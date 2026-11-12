@@ -1,0 +1,154 @@
+# true false
+$X true; $X false
+$X true --help >/dev/null
+# echo
+$X echo hello world
+$X echo -n no newline
+$X echo -e 'a\tb\nc\x41\0101\\'
+$X echo -e 'stop\cnot'
+$X echo -ex foo
+$X echo -- -n
+$X echo
+# yes
+$X yes | head -3
+$X yes a b | head -2
+# cat
+printf 'a\n\n\n\tb\001\n\200x' > f; $X cat f
+printf 'a\n\n\n\tb\001\n\200x' > f; $X cat -A f
+printf 'a\n\n\n\tb\n' > f; $X cat -n f
+printf 'a\n\n\n\tb\n' > f; $X cat -b f
+printf 'a\n\n\n\tb\n' > f; $X cat -s f
+printf 'a\n\n\n\tb\n' > f; $X cat -sn f f
+printf 'x\n' | $X cat - 
+$X cat nope
+printf 'q\n' > f; $X cat nope f
+$X cat --number-nonblank /dev/null
+$X cat --bogus
+$X cat -z
+# pwd
+cd /usr/lib && $X pwd
+cd /usr/lib && $X pwd -P
+# sleep
+$X sleep 0.1
+$X sleep 0.05s .01
+$X sleep
+$X sleep 1x
+# basename dirname
+$X basename /usr/lib/foo.so .so
+$X basename /usr/lib/
+$X basename /
+$X basename //
+$X basename foo.c .c
+$X basename .c .c
+$X basename -a /a/b /c/d
+$X basename -s .h a.h b/c.h
+$X basename
+$X basename a b c
+$X dirname /usr/lib/foo
+$X dirname /usr/
+$X dirname usr
+$X dirname /
+$X dirname //a//b//
+$X dirname a/b c/d/e
+$X dirname
+# uname arch
+$X uname
+$X uname -s -r -m
+$X arch
+$X uname x
+# printenv
+FOO=bar $X printenv FOO
+FOO=bar $X printenv FOO NOPE
+$X printenv | grep -c '^PATH='
+# env
+FOO=1 $X env | grep '^FOO='
+$X env -i A=1 B=2
+$X env -i
+FOO=1 $X env -u FOO | grep -c '^FOO='
+$X env -i PATH=/usr/bin:/bin sh -c 'echo $X1' 
+$X env -i X1=hi sh -c 'echo $X1'
+$X env nonexistent-cmd-xyz
+$X env -C / pwd
+# link unlink
+touch a; $X link a b; ls
+$X link nope b
+touch a; $X unlink a; ls
+$X unlink nope
+$X unlink
+# tty
+$X tty < /dev/null
+$X tty -s < /dev/null
+# nproc
+$X nproc
+$X nproc --all
+$X nproc --ignore=1000
+OMP_NUM_THREADS=3 $X nproc
+# whoami logname hostid hostname
+$X whoami
+$X hostid
+# mkdir
+$X mkdir d; ls -ld d | cut -c1-10
+$X mkdir -p a/b/c; find a | sort
+$X mkdir -pv x/y
+$X mkdir -m 700 m; ls -ld m | cut -c1-10
+$X mkdir -m u=rwx,g=rx,o= m; ls -ld m | cut -c1-10
+$X mkdir -m a+t s; ls -ld s | cut -c1-10
+$X mkdir d d
+$X mkdir -p d d; echo ok
+touch f; $X mkdir -p f
+$X mkdir
+$X mkdir -m bogus z
+$X mkdir nope/sub
+# rmdir
+mkdir -p a/b/c; $X rmdir a/b/c; find a | sort
+mkdir -p a/b/c; $X rmdir -p a/b/c; ls
+mkdir -p a/b; touch a/f; $X rmdir -p a/b; find a | sort
+mkdir -p a/b; touch a/b/f; $X rmdir --ignore-fail-on-non-empty a/b; echo $?
+mkdir -p a/b/c; $X rmdir -pv a/b/c
+$X rmdir nope
+# rm
+touch a b; $X rm a; ls
+$X rm nope
+$X rm -f nope; echo $?
+$X rm
+$X rm -f
+mkdir d; $X rm d
+mkdir -p d/e; touch d/e/f d/g; $X rm -r d; ls
+mkdir -p d/e; touch d/e/f d/g; $X rm -rv d | sort
+mkdir d; $X rm -d d; ls
+mkdir -p d/e; $X rm -d d
+$X rm -r .
+$X rm -rf /
+touch a; ln -s a l; $X rm l; ls
+mkdir d; ln -s d l; $X rm -r l; ls
+# chmod
+touch f; $X chmod 600 f; ls -l f | cut -c1-10
+touch f; $X chmod u+x,g-r f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod a=r f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod -w f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod go= f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod g=u f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod +X f; ls -l f | cut -c1-10
+mkdir d; chmod 700 d; $X chmod +X d; ls -ld d | cut -c1-10
+touch f; $X chmod u+s,o+t f; ls -l f | cut -c1-10
+touch f; chmod 644 f; $X chmod -v 755 f
+touch f; chmod 644 f; $X chmod -c 644 f
+touch f; chmod 644 f; $X chmod -v 644 f
+mkdir -p d/e; touch d/f d/e/g; $X chmod -R 700 d; ls -lR d | cut -c1-10 | sort
+touch f r; chmod 640 r; $X chmod --reference=r f; ls -l f | cut -c1-10
+$X chmod 644 nope
+$X chmod bad f
+$X chmod 644
+# chown chgrp (to ourselves)
+touch f; $X chown $(id -u) f; echo $?
+touch f; $X chown $(id -un):$(id -gn) f; echo $?
+touch f; $X chgrp $(id -g) f; echo $?
+touch f; $X chown nosuchuser f
+touch f; $X chgrp nosuchgroup f
+touch f; $X chown -v $(id -un) f
+# mkfifo mknod
+$X mkfifo p; ls -l p | cut -c1-10
+$X mkfifo -m 600 p; ls -l p | cut -c1-10
+$X mknod q p; ls -l q | cut -c1-10
+$X mknod q x
+$X mknod q c 1
