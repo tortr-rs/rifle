@@ -4,6 +4,7 @@
 # name, the way you'd use it, with everything else in the case (ls, find, sort...) still the system's
 # usage: tests/run.sh [pattern]
 cd "$(dirname "$0")/.."
+export LC_ALL=C
 BIN=$PWD/bin
 [ -x "$BIN/cat" ] || { echo 'run ./build.sh first' >&2; exit 2; }
 T=$(mktemp -d /var/tmp/rifle-test.XXXXXX)
@@ -25,7 +26,7 @@ while IFS= read -r c; do
 		pass=$((pass+1))
 	else
 		fail=$((fail+1))
-		echo "FAIL: $c"
+		printf "FAIL: %s\n" "$c"
 		diff "$T/g.out" "$T/r.out" | head -8 | sed 's/^/    /'
 	fi
 done < tests/cases

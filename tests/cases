@@ -152,3 +152,355 @@ $X mkfifo -m 600 p; ls -l p | cut -c1-10
 $X mknod q p; ls -l q | cut -c1-10
 $X mknod q x
 $X mknod q c 1
+# touch
+$X touch a b; ls
+$X touch -c nope; ls
+touch -d '2020-01-02 03:04:05' r; $X touch -r r f; stat -c %Y f
+$X touch -d '2021-03-04 05:06:07' f; stat -c %Y f
+$X touch -t 202105060708.09 f; stat -c %Y f
+$X touch -t 0105060708 f; stat -c %Y f
+$X touch -d @1000000000 f; stat -c %Y f
+touch -d '2000-01-01' f; $X touch -a -d '2020-01-01' f; stat -c '%X %Y' f
+touch -d '2000-01-01' f; $X touch -m -d '2020-01-01' f; stat -c '%X %Y' f
+$X touch -d garbage f
+$X touch
+$X touch nope/f
+# ln
+touch a; $X ln a b; ls -i a b | awk '{print $1}' | uniq | wc -l
+touch a; $X ln -s a l; readlink l
+touch a; $X ln -s a l; $X ln -s a l
+touch a; $X ln -s a l; $X ln -sf b l; readlink l
+touch a b; $X ln b a
+touch a b; $X ln -f b a; ls -i a b | awk '{print $1}' | uniq | wc -l
+mkdir d; touch a b; $X ln a b d; ls d
+mkdir d; touch a; $X ln -s ../a d/l; readlink d/l
+mkdir -p d/e; touch d/e/f; $X ln -sr d/e/f l; readlink l
+mkdir d; touch a; $X ln -sr a d/l; readlink d/l
+touch a; $X ln -sv a l
+touch a; $X ln -v a b
+mkdir d; touch a; $X ln -t d a; ls d
+touch a b; $X ln -T a b
+touch a; $X ln -T a b; ls
+$X ln
+$X ln nope l
+touch a b c; $X ln a b c
+# readlink realpath
+ln -s target l; $X readlink l
+touch f; $X readlink f; echo $?
+ln -s target l; $X readlink -f l | sed "s|$PWD|CWD|"
+touch f; ln -s f l; $X readlink -f l | sed "s|$PWD|CWD|"
+$X readlink -e nope; echo $?
+$X readlink -m nope/x/../y | sed "s|$PWD|CWD|"
+ln -s a l1; ln -s l1 l2; $X readlink l2
+ln -s a l1; ln -s l1 l2; $X readlink -n l2; echo
+$X realpath .  | sed "s|$PWD|CWD|"
+mkdir -p a/b; $X realpath a/b/../b/. | sed "s|$PWD|CWD|"
+$X realpath -m x/y/../z | sed "s|$PWD|CWD|"
+r=$($X realpath nope); echo $?; echo "$r" | sed "s|$PWD|CWD|"
+$X realpath -e nope; echo $?
+$X realpath -q nope | sed "s|$PWD|CWD|"
+mkdir d; ln -s d l; $X realpath l | sed "s|$PWD|CWD|"
+mkdir d; ln -s d l; $X realpath -s l | sed "s|$PWD|CWD|"
+mkdir -p a/b c; $X realpath --relative-to=a/b c
+mkdir -p a/b c; $X realpath --relative-to=c a/b
+mkdir -p a/b; $X realpath --relative-to=a a/b
+mkdir -p a/b; $X realpath --relative-to=a/b a
+mkdir a; $X realpath --relative-to=a a
+mkdir -p a/b; $X realpath -z a/b | tr '\0' X | sed "s|$PWD|CWD|"
+$X realpath
+# mktemp
+f=$($X mktemp XXXXXX); test -f $f && echo ${#f}
+f=$($X mktemp -d XXXXXXXX); test -d $f && echo ${#f}
+f=$($X mktemp pre.XXXXXX.suf --suffix=.txt 2>&1); echo $?
+f=$($X mktemp --suffix=.txt XXXXXX); echo ${f##*.}
+f=$($X mktemp -u XXXXXX); test -e $f; echo $?
+$X mktemp XX; echo $?
+$X mktemp a/b/XXXXXX; echo $?
+d=$(mktemp -d); f=$($X mktemp -p $d); case $f in $d/tmp.*) echo yes;; esac
+d=$(mktemp -d); f=$(TMPDIR=$d $X mktemp); case $f in $d/tmp.*) echo yes;; esac
+# head
+printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n' > f; $X head f
+printf '1\n2\n3\n4\n5\n' > f; $X head -n 2 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -2 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -n -2 f
+printf '1\n2\n3\n4\n5' > f; $X head -n -1 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -n -9 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -n 0 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -c 5 f
+printf '1\n2\n3\n4\n5\n' > f; $X head -c -4 f
+printf 'abcdef' > f; $X head -c 1K f
+printf '1\n2\n3\n' > f; printf 'a\nb\nc\n' > g; $X head -n 1 f g
+printf '1\n2\n3\n' > f; printf 'a\nb\nc\n' > g; $X head -q -n 1 f g
+printf '1\n2\n3\n' > f; $X head -v -n 1 f
+printf '1\n2\n3\n' > f; $X head -n 1 - f < f
+printf '1\0002\0003\000' > f; $X head -z -n 2 f | tr '\0' X
+printf '1\n2\n3\n' | $X head -n 2
+$X head nope
+$X head -n x f
+printf 'a\nb\nc\nd\n' > f; $X head -n 2K f
+# tail
+printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n' > f; $X tail f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n 2 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -2 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n +3 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n +1 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n +9 f
+printf '1\n2\n3\n4\n5' > f; $X tail -n 2 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n 0 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -n 99 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -c 4 f
+printf '1\n2\n3\n4\n5\n' > f; $X tail -c +4 f
+printf '1\n2\n3\n' > f; printf 'a\nb\nc\n' > g; $X tail -n 1 f g
+printf '1\n2\n3\n' > f; printf 'a\nb\nc\n' > g; $X tail -q -n 1 f g
+printf '1\n2\n3\n' | $X tail -n 2
+printf '1\n2\n3\n4\n5\n' | $X tail -n +4
+printf '1\n2\n3\n4\n5\n' | $X tail -c 3
+printf '1\0002\0003\000' > f; $X tail -z -n 2 f | tr '\0' X
+printf '' > f; $X tail f
+$X tail nope
+$X tail -n x f
+# wc
+printf 'a b\nc\n' > f; $X wc f
+printf 'a b\nc\n' > f; $X wc -l f
+printf 'a b\nc\n' > f; $X wc -w f
+printf 'a b\nc\n' > f; $X wc -c f
+printf 'a b\nc\n' > f; $X wc -lw f
+printf 'a b\nc\n' > f; $X wc < f
+printf 'a b\nc\n' | $X wc
+printf 'a b\nc\n' | $X wc -l
+printf 'a b\nc\n' | $X wc -c
+printf 'a b\nc\n' > f; printf 'x' > g; $X wc f g
+printf 'a b\nc\n' > f; head -c 123456 /dev/zero > g; $X wc f g
+printf 'a b\nc\n' > f; head -c 123456 /dev/zero > g; $X wc -l f g
+printf 'a b\nc\n' > f; echo hi | $X wc f -
+printf 'a b\nc\n' > f; $X wc nope f
+printf 'a b\nc\n' > f; $X wc --total=only f f
+printf 'a b\nc\n' > f; $X wc --total=never f f
+printf 'a b\nc\n' > f; $X wc --total=always f
+printf 'abc\n\tx\nlonger line here\n' > f; $X wc -L f
+printf '\tx\n' > f; $X wc -L f
+printf '  lead  and trail  \n' > f; $X wc -w f
+printf 'one\ttwo\nthree' > f; $X wc f
+$X wc /dev/null
+mkdir d; $X wc d
+printf 'f\0g\0' > list; printf 'a\n' > f; printf 'b\nb\n' > g; $X wc --files0-from=list
+$X wc -m /dev/null
+# tee
+echo hi | $X tee f; cat f
+echo hi | $X tee f g; cat f g
+echo a | $X tee f >/dev/null; echo b | $X tee -a f >/dev/null; cat f
+echo hi | $X tee nope/f; echo $?
+echo hi | $X tee - f
+# tr
+echo hello | $X tr a-y b-z
+echo hello | $X tr el ip
+echo hello | $X tr -d l
+echo hello | $X tr -s l
+echo 'a  b   c' | $X tr -s ' '
+echo 'a  b   c' | $X tr -s ' ' '\n'
+echo hello | $X tr a-z A-Z
+echo hello | $X tr '[:lower:]' '[:upper:]'
+echo 'Hello World 123' | $X tr -d '[:digit:]'
+echo 'Hello World 123' | $X tr -cd '[:alpha:]'
+echo 'Hello World 123' | $X tr -c '[:alpha:]' '_'
+echo 'Hello World 123' | $X tr -cs '[:alnum:]' '\n'
+echo hello | $X tr -t abc x
+echo hello | $X tr abcdefghij x
+echo hello | $X tr 'a-e' '[x*]'
+echo hello | $X tr 'a-e' '[x*2]y'
+printf 'a\tb\n' | $X tr '\t' ' '
+printf 'a\\b\n' | $X tr '\\' '/'
+printf 'a,b\n' | $X tr ',' '\012'
+echo hello | $X tr -d
+echo hello | $X tr a
+echo hello | $X tr -d a b
+echo hello | $X tr z-a x
+echo hello | $X tr '[:bogus:]' x
+echo hello | $X tr -ds l 'o'
+echo 'aabbcc' | $X tr -s 'a-c' 'x-z'
+# seq
+$X seq 5
+$X seq 2 5
+$X seq 1 2 10
+$X seq 10 -3 1
+$X seq 5 1
+$X seq 0 0
+$X seq -3 3
+$X seq 1 0.5 3
+$X seq 0 0.1 0.5
+$X seq 1.5 3
+$X seq -w 8 12
+$X seq -w 1 10
+$X seq -w -3 3
+$X seq -s, 5
+$X seq -s ' - ' 1 3
+$X seq -f '%03g' 3
+$X seq -f 'n%.2f' 1 3
+$X seq 3 -1 1
+$X seq 1 1 1
+$X seq 1 0 5
+$X seq a
+$X seq 1 2 3 4
+$X seq
+$X seq 1e2 | tail -1
+# tac
+printf 'a\nb\nc\n' | $X tac
+printf 'a\nb\nc' | $X tac
+printf 'a,b,c' | $X tac -s,
+printf 'a,b,c,' | $X tac -s,
+printf 'A1B1C1' | $X tac -b -s1
+printf 'xAByABz' | $X tac -s AB
+printf '' | $X tac
+printf '\n\na\n' | $X tac
+printf 'a\n' > f; printf 'b\n' > g; $X tac f g
+$X tac nope
+# nl
+printf 'a\n\nb\n\n\nc\n' | $X nl
+printf 'a\n\nb\n\n\nc\n' | $X nl -ba
+printf 'a\n\nb\n\n\nc\n' | $X nl -ba -w3 -s:
+printf 'a\n\nb\n\n\nc\n' | $X nl -ba -l2
+printf 'a\nb\n' | $X nl -n ln -w2
+printf 'a\nb\n' | $X nl -n rz -w4
+printf 'a\nb\nc\n' | $X nl -v10 -i5
+printf 'a\n\nb\n' | $X nl -bn
+printf 'a\nb' | $X nl
+printf 'a\nb\n' | $X nl -s'  '
+$X nl -b x /dev/null
+# fold
+printf 'abcdefghij klmno pqrstu\n' | $X fold -w 8
+printf 'abcdefghij klmno pqrstu\n' | $X fold -s -w 8
+printf 'ab\tcdefgh\n' | $X fold -w 10
+printf 'abcdefghij\n' | $X fold -w 4
+printf 'abcdefghij\n' | $X fold -5
+printf 'abc def ghi jkl\n' | $X fold -s -w 5
+printf 'a\nb\n' | $X fold
+printf 'abcdefghij' | $X fold -w 3
+printf 'abcdefghij\n' | $X fold -b -w 4
+printf 'a\tb\n' | $X fold -b -w 3
+$X fold -w 0 /dev/null
+# cut
+printf 'abc:def:ghi\n' | $X cut -d: -f2
+printf 'abc:def:ghi\n' | $X cut -d: -f1,3
+printf 'abc:def:ghi\n' | $X cut -d: -f2-
+printf 'abc:def:ghi\n' | $X cut -d: -f-2
+printf 'abc:def:ghi\n' | $X cut -d: -f1-2,3
+printf 'abc:def:ghi\n' | $X cut -d: --complement -f2
+printf 'abc:def:ghi\n' | $X cut -d: -f2 --output-delimiter=X
+printf 'abc:def:ghi\n' | $X cut -d: -f1,3 --output-delimiter=X
+printf 'abc def\n' | $X cut -f1
+printf 'abc def\n' | $X cut -s -f1
+printf 'a\tb\tc\n' | $X cut -f2
+printf 'abcdef\n' | $X cut -c2-4
+printf 'abcdef\n' | $X cut -c1,3,5
+printf 'abcdef\n' | $X cut -c4-
+printf 'abcdef\n' | $X cut -b-2
+printf 'abcdef\n' | $X cut -c 2-3,5-6 --output-delimiter=-
+printf 'abcdef\n' | $X cut --complement -c2-3
+printf 'a:b\nc:d' | $X cut -d: -f2
+printf 'a:b::d\n' | $X cut -d: -f3
+printf 'a:b::d\n' | $X cut -d: -f5
+printf 'a\0b\0' | $X cut -z -c1 | tr '\0' X
+$X cut
+$X cut -f
+$X cut -f0 /dev/null
+$X cut -f2-1 /dev/null
+$X cut -d:: -f1 /dev/null
+$X cut -s -c1 /dev/null
+$X cut -c1 -f1 /dev/null
+# paste
+printf '1\n2\n3\n' > a; printf 'a\nb\nc\n' > b; $X paste a b
+printf '1\n2\n3\n' > a; printf 'a\nb\n' > b; $X paste a b
+printf '1\n2\n' > a; printf 'a\nb\nc\n' > b; $X paste a b
+printf '1\n2\n3\n' > a; printf 'a\nb\nc\n' > b; $X paste -d, a b
+printf '1\n2\n3\n' > a; printf 'a\nb\nc\n' > b; printf 'x\ny\nz\n' > c; $X paste -d,: a b c
+printf '1\n2\n3\n' > a; printf 'a\nb\nc\n' > b; $X paste -s a b
+printf '1\n2\n3\n' > a; $X paste -s -d, a
+printf '1\n2\n3\n4\n' > a; $X paste -s -d,: a
+printf '1\n2\n3\n' > a; $X paste -d '\t\n' a a
+printf '1\n2\n3\n4\n' | $X paste - -
+printf '1\n2\n3\n4\n5\n' | $X paste - - -
+printf '1\n2\n3\n' > a; $X paste -d '' a a
+printf '1\n2\n3\n' > a; $X paste a nope
+printf '1\n2\n3' > a; $X paste a a
+printf '1\n2\n3\n' > a; $X paste -d '\\' a a
+# uniq
+printf 'a\na\nb\nb\nb\nc\n' | $X uniq
+printf 'a\na\nb\nb\nb\nc\n' | $X uniq -c
+printf 'a\na\nb\nb\nb\nc\n' | $X uniq -d
+printf 'a\na\nb\nb\nb\nc\n' | $X uniq -u
+printf 'a\na\nb\nb\nb\nc\n' | $X uniq -D
+printf 'a\nA\nb\nB\n' | $X uniq -i
+printf 'a\nA\nb\nB\n' | $X uniq -ic
+printf 'a 1\nb 1\nc 2\n' | $X uniq -f1
+printf 'xa\nya\nzb\n' | $X uniq -s1
+printf 'abc\nabd\nxyz\n' | $X uniq -w2
+printf 'a\nb\na\n' | $X uniq
+printf 'a\na' | $X uniq -c
+printf '' | $X uniq
+printf 'a\na\nb\n' > in; $X uniq in out; cat out
+printf 'a\0a\0b\0' | $X uniq -z | tr '\0' X
+$X uniq -f x /dev/null
+$X uniq a b c
+# comm
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm -12 f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm -23 f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm -13 f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm -3 f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm -1 f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm --output-delimiter=: f g
+printf 'a\nb\nc\n' > f; printf 'b\nc\nd\n' > g; $X comm --total f g
+printf 'a\n' > f; printf '' > g; $X comm f g
+printf 'a\n' > f; printf 'a\n' > g; $X comm f g
+printf 'a\nb\n' > f; $X comm f - < f
+$X comm f
+$X comm nope f
+# sort
+printf 'b\na\nc\n' | $X sort
+printf 'b\na\nc\n' | $X sort -r
+printf 'b\na\nB\nA\n' | $X sort
+printf 'b\na\nB\nA\n' | $X sort -f
+printf '10\n9\n100\n1\n' | $X sort
+printf '10\n9\n100\n1\n' | $X sort -n
+printf '10\n9\n100\n1\n' | $X sort -nr
+printf '10\n-9\n1.5\n-0.5\n0\n' | $X sort -n
+printf '1e3\n5\n2.5e1\n' | $X sort -g
+printf '1K\n1M\n500\n2K\n1G\n' | $X sort -h
+printf 'Mar\nJan\nFeb\nxyz\nDEC\n' | $X sort -M
+printf 'v1.10\nv1.9\nv1.2\nv10\nv2\n' | $X sort -V
+printf 'b\na\nb\na\nc\n' | $X sort -u
+printf 'b 1\na 2\nb 3\na 4\n' | $X sort -k1,1
+printf 'b 1\na 2\nb 3\na 4\n' | $X sort -k1,1 -s
+printf 'b 1\na 2\nb 3\na 4\n' | $X sort -k1,1 -u
+printf 'b 1\na 2\nb 3\na 4\n' | $X sort -k2nr
+printf 'b 10\na 9\nb 100\na 1\n' | $X sort -k2,2n
+printf 'x b\ny a\nz c\n' | $X sort -k2
+printf 'a:3\nb:1\nc:2\n' | $X sort -t: -k2n
+printf 'a:3:x\nb:1:y\nc:1:a\n' | $X sort -t: -k2,2n -k3,3r
+printf '  b\na\n c\n' | $X sort
+printf '  b\na\n c\n' | $X sort -b
+printf 'a b\na  b\na c\n' | $X sort -k2
+printf 'abc\nabd\nabb\n' | $X sort -k1.3
+printf 'abc\nabd\nabb\n' | $X sort -k1.1,1.2
+printf 'a1\nb2\nc0\n' | $X sort -k1.2n
+printf 'a-b\nab\na b\n' | $X sort -d
+printf 'a-b\nab\na b\n' | $X sort -i
+printf 'b\na\n' | $X sort -c; echo $?
+printf 'a\nb\n' | $X sort -c; echo $?
+printf 'a\nb\nb\n' | $X sort -cu; echo $?
+printf 'b\na\n' | $X sort -C; echo $?
+printf 'b\na\nc' | $X sort
+printf '' | $X sort
+printf 'b\0a\0' | $X sort -z | tr '\0' X
+printf 'b\na\n' > f; $X sort -o f f; cat f
+printf 'b\na\n' > f; printf 'd\nc\n' > g; $X sort f g
+printf 'b\na\n' > f; printf 'd\nc\n' > g; $X sort -m f g
+$X sort nope
+printf 'a\n' | $X sort -k0
+printf 'a b\n' | $X sort -k 2,1
+printf '3\n1\n2\n' | $X sort -n -k1,1
+printf '2 b\n10 a\n1 c\n' | $X sort -n
+printf 'a\nb\n' | $X sort -R | wc -l
+printf '5\n3\n' | $X sort --numeric-sort
+printf '5\n3\n' | $X sort --reverse --numeric-sort
+printf '1\n2\n' | $X sort --sort=numeric

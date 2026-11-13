@@ -639,6 +639,7 @@ unsigned long strtoul(const char *s, char **end, int base) { return strtoull(s, 
 long strtol(const char *s, char **end, int base) { return strtoull(s, end, base); }
 int atoi(const char *s) { return strtol(s, NULL, 10); }
 long atol(const char *s) { return strtol(s, NULL, 10); }
+long long atoll(const char *s) { return strtoll(s, NULL, 10); }
 
 long double ldexpl(long double x, int e)
 {
