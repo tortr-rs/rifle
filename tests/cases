@@ -504,3 +504,45 @@ printf 'a\nb\n' | $X sort -R | wc -l
 printf '5\n3\n' | $X sort --numeric-sort
 printf '5\n3\n' | $X sort --reverse --numeric-sort
 printf '1\n2\n' | $X sort --sort=numeric
+echo hi >a; $X cp a b; cat b; ls
+echo hi >a; mkdir d; $X cp a d; cat d/a
+echo hi >a; echo yo >b; $X cp -n a b; cat b
+echo hi >a; $X cp -v a b
+echo hi >a; $X cp a a
+$X cp nothere b
+mkdir d; $X cp d e
+mkdir -p d/x/y; echo 1 >d/x/y/f; $X cp -r d e; cat e/x/y/f
+mkdir -p d/x; echo 1 >d/x/f; $X cp -R d d/x; echo $?
+mkdir d; echo 1 >d/f; $X cp -rv d e | sort
+echo hi >a; ln -s a l; $X cp l m; test -L m && echo link || echo file
+echo hi >a; ln -s a l; $X cp -P l m; test -L m && echo link || echo file
+echo hi >a; ln -s a l; $X cp -a l m; readlink m
+echo hi >a; chmod 640 a; $X cp a b; stat -c %a b
+echo hi >a; chmod 640 a; $X cp -p a b; stat -c %a b
+echo hi >a; touch -d 2001-02-03 a; $X cp -p a b; stat -c %Y b
+echo hi >a; $X cp -t . a 2>&1; echo $?
+echo hi >a; mkdir d; $X cp -t d a; cat d/a
+echo hi >a; mkdir d; $X cp -T a d; echo $?
+echo hi >a; $X cp -l a b; stat -c %h a
+echo hi >a; $X cp -s a b; readlink b
+echo hi >a; echo yo >b; chmod 444 b; $X cp -f a b; cat b
+echo a >a; echo b >b; mkdir d; $X cp a b d; ls d
+echo a >a; $X cp a b c
+echo a >a; $X cp a
+$X cp
+echo hi >a; $X mv a b; cat b; ls
+echo hi >a; mkdir d; $X mv a d; cat d/a; ls
+echo hi >a; echo yo >b; $X mv -n a b; cat b; ls | wc -l
+echo hi >a; $X mv -v a b
+echo hi >a; $X mv a a
+$X mv nothere b
+mkdir -p d/x; echo 1 >d/x/f; $X mv d e; cat e/x/f; ls
+mkdir d; $X mv d d/x; echo $?
+echo a >a; echo b >b; mkdir d; $X mv a b d; ls d
+echo a >a; $X mv a b c
+echo a >a; $X mv a
+echo a >a; mkdir d; $X mv -T a d; echo $?
+echo a >a; echo b >b; $X mv -f a b; cat b
+echo a >a; mkdir d; $X mv -t d a; ls d
+echo a >a; ln -s a l; $X mv l m; readlink m
+echo a >a; touch -d 2001-02-03 a; $X mv a b; stat -c %Y b

@@ -1770,6 +1770,296 @@ next:
     return finish_stdout() ? 1 : st;
 }
 
+/* ---- cp mv ---- */
+
+/* where each operand goes: into a directory (*tdir) or onto one name (the last operand) */
+static int plan_dest(const char *tdir_opt, int notdir, int follow, const char **tdir, char ***srcs, int *nsrcs)
+{
+    struct stat sb;
+    *tdir = tdir_opt;
+    *srcs = ops; *nsrcs = nops;
+    if (!nops) missing_operand();
+    if (tdir_opt && notdir) { say("cannot combine --target-directory and --no-target-directory"); usage_error(); }
+    if (tdir_opt) return 0;
+    if (nops == 1) { say("missing destination file operand after '%s'", ops[0]); usage_error(); }
+    if (notdir) {
+        if (nops > 2) extra_operand(ops[2]);
+        *nsrcs = 1;
+        return 0;
+    }
+    *nsrcs = nops - 1;
+    if ((follow ? stat(ops[nops - 1], &sb) : lstat(ops[nops - 1], &sb)) == 0 && S_ISDIR(sb.st_mode)) *tdir = ops[nops - 1];
+    else if (nops > 2) { say("target '%s' is not a directory", ops[nops - 1]); usage_error(); }
+    return 0;
+}
+
+static char *dest_in(const char *dir, const char *src)
+{
+    char *t = xstrdup(src), *b, *d;
+    size_t n = strlen(t);
+    while (n > 1 && t[n - 1] == '/') t[--n] = 0;
+    b = strrchr(t, '/'); b = b && b[1] ? b + 1 : t;
+    d = xmalloc(strlen(dir) + strlen(b) + 2);
+    sprintf(d, "%s%s%s", dir, dir[strlen(dir) - 1] == '/' ? "" : "/", b);
+    free(t);
+    return d;
+}
+
+static int yes_answer(void)
+{
+    char line[16];
+    return fgets(line, sizeof line, stdin) && (line[0] == 'y' || line[0] == 'Y');
+}
+
+struct cp {
+    int rec, force, ask, keep, verbose, preserve, follow_top, follow_all, hard, sym, update;
+    mode_t um;
+    dev_t top_dev; ino_t top_ino;           /* the destination directory we are filling */
+    const char *top_src, *top_dest;
+};
+
+static int cp_data(int in, int out)
+{
+    char buf[65536];
+    ssize_t n;
+    while ((n = read(in, buf, sizeof buf)) > 0)
+        if (write_all(out, buf, n) < 0) return -1;
+    return n < 0 ? -1 : 0;
+}
+
+static void cp_keep(const struct cp *o, const char *dest, const struct stat *st, int fd)
+{
+    struct timespec t[2];
+    if (!o->preserve) return;
+    if (fd >= 0) { if (fchown(fd, st->st_uid, st->st_gid) < 0) fchown(fd, -1, st->st_gid); }
+    else if (lchown(dest, st->st_uid, st->st_gid) < 0) lchown(dest, -1, st->st_gid);
+    if (!S_ISLNK(st->st_mode)) {
+        if (fd >= 0) fchmod(fd, st->st_mode & 07777); else chmod(dest, st->st_mode & 07777);
+    }
+    t[0].tv_sec = st->st_atime; t[0].tv_nsec = st->st_atime_nsec;
+    t[1].tv_sec = st->st_mtime; t[1].tv_nsec = st->st_mtime_nsec;
+    utimensat(AT_FDCWD, dest, t, S_ISLNK(st->st_mode) ? AT_SYMLINK_NOFOLLOW : 0);
+}
+
+static int cp_one(struct cp *o, const char *src, const char *dest, int top)
+{
+    struct stat st, ds;
+    int follow = top ? o->follow_top : o->follow_all, have;
+    if ((follow ? stat(src, &st) : lstat(src, &st)) < 0) { perr("cannot stat '%s'", src); return 1; }
+    have = lstat(dest, &ds) == 0;
+    if (have && !S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode) && !o->hard) {
+        struct stat dd;
+        if (stat(dest, &dd) == 0 && dd.st_dev == st.st_dev && dd.st_ino == st.st_ino) {
+            say("'%s' and '%s' are the same file", src, dest);
+            return 1;
+        }
+    }
+    if (S_ISDIR(st.st_mode)) {
+        mode_t m;
+        int bad = 0, n = 0, cap = 0, i;
+        DIR *d;
+        struct dirent *e;
+        char **names = NULL;
+        if (!o->rec) { say("-r not specified; omitting directory '%s'", src); return 1; }
+        if (o->top_ino && st.st_dev == o->top_dev && st.st_ino == o->top_ino) {
+            say("cannot copy a directory, '%s', into itself, '%s'", o->top_src, o->top_dest);
+            return 1;
+        }
+        if (have && !S_ISDIR(ds.st_mode)) { say("cannot overwrite non-directory '%s' with directory '%s'", dest, src); return 1; }
+        m = o->preserve ? st.st_mode & 07777 : st.st_mode & ~o->um & 0777;
+        if (!have) {
+            if (mkdir(dest, m | S_IRWXU) < 0) { perr("cannot create directory '%s'", dest); return 1; }
+            if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        }
+        if (top) {
+            struct stat t;
+            if (stat(dest, &t) == 0) { o->top_dev = t.st_dev; o->top_ino = t.st_ino; o->top_src = src; o->top_dest = dest; }
+        }
+        d = opendir(src);
+        if (!d) { perr("cannot access '%s'", src); return 1; }
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            if (n == cap) { cap = cap ? cap * 2 : 32; names = xrealloc(names, cap * sizeof *names); }
+            names[n++] = xstrdup(e->d_name);
+        }
+        closedir(d);
+        for (i = 0; i < n; i++) {
+            char *cs = xmalloc(strlen(src) + strlen(names[i]) + 2), *cd = xmalloc(strlen(dest) + strlen(names[i]) + 2);
+            sprintf(cs, "%s%s%s", src, src[strlen(src) - 1] == '/' ? "" : "/", names[i]);
+            sprintf(cd, "%s%s%s", dest, dest[strlen(dest) - 1] == '/' ? "" : "/", names[i]);
+            bad |= cp_one(o, cs, cd, 0);
+            free(cs); free(cd); free(names[i]);
+        }
+        free(names);
+        if (!have) chmod(dest, m);
+        cp_keep(o, dest, &st, -1);
+        return bad;
+    }
+    if (have && S_ISDIR(ds.st_mode)) { say("cannot overwrite directory '%s' with non-directory", dest); return 1; }
+    if (have) {
+        if (o->update) {
+            struct stat dd;
+            if (stat(dest, &dd) == 0 && (dd.st_mtime > st.st_mtime || (dd.st_mtime == st.st_mtime && dd.st_mtime_nsec >= st.st_mtime_nsec))) return 0;
+        }
+        if (o->keep) return 0;
+        if (o->ask) {
+            fflush(stdout);
+            fprintf(stderr, "%s: overwrite '%s'? ", prog, dest);
+            if (!yes_answer()) return 0;
+        }
+    }
+    if (o->hard || o->sym) {
+        int r;
+        if (have && (unlink(dest) < 0 && errno != ENOENT)) { perr("cannot remove '%s'", dest); return 1; }
+        r = o->sym ? symlink(src, dest) : link(src, dest);
+        if (r < 0) { perr("cannot create %s link '%s'", o->sym ? "symbolic" : "hard", dest); return 1; }
+        if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        return 0;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        char tgt[PATH_MAX];
+        ssize_t n = readlink(src, tgt, sizeof tgt - 1);
+        if (n < 0) { perr("cannot read symbolic link '%s'", src); return 1; }
+        tgt[n] = 0;
+        if (have) unlink(dest);
+        if (symlink(tgt, dest) < 0) { perr("cannot create symbolic link '%s'", dest); return 1; }
+        if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        cp_keep(o, dest, &st, -1);
+        return 0;
+    }
+    if (S_ISFIFO(st.st_mode) && o->rec) {
+        if (have) unlink(dest);
+        if (mkfifo(dest, st.st_mode & 0777 & ~o->um) < 0) { perr("cannot create fifo '%s'", dest); return 1; }
+        if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        cp_keep(o, dest, &st, -1);
+        return 0;
+    }
+    if ((S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) && o->rec) {
+        if (have) unlink(dest);
+        if (mknod(dest, st.st_mode, st.st_rdev) < 0) { perr("cannot create special file '%s'", dest); return 1; }
+        if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        cp_keep(o, dest, &st, -1);
+        return 0;
+    }
+    {
+        int in = open(src, O_RDONLY), out;
+        mode_t m = o->preserve ? st.st_mode & 07777 : st.st_mode & ~o->um & 0777;
+        if (in < 0) { perr("cannot open '%s' for reading", src); return 1; }
+        out = open(dest, O_WRONLY | O_CREAT | (have ? O_TRUNC : O_EXCL), m);
+        if (out < 0 && have && o->force) { unlink(dest); out = open(dest, O_WRONLY | O_CREAT | O_EXCL, m); }
+        if (out < 0) { perr("cannot create regular file '%s'", dest); close(in); return 1; }
+        if (o->verbose) printf("'%s' -> '%s'\n", src, dest);
+        if (cp_data(in, out) < 0) { perr("error copying '%s'", src); close(in); close(out); return 1; }
+        cp_keep(o, dest, &st, out);
+        close(in);
+        if (close(out) < 0) { perr("failed to close '%s'", dest); return 1; }
+    }
+    return 0;
+}
+
+static int t_cp(int argc, char **argv)
+{
+    static const struct opt lo[] = {
+        { "recursive", 0, 'R' }, { "archive", 0, 'a' }, { "force", 0, 'f' }, { "interactive", 0, 'i' }, { "no-clobber", 0, 'n' },
+        { "verbose", 0, 'v' }, { "preserve", 2, 'p' }, { "no-dereference", 0, 'P' }, { "dereference", 0, 'L' },
+        { "link", 0, 'l' }, { "symbolic-link", 0, 's' }, { "update", 0, 'u' }, { "no-target-directory", 0, 'T' },
+        { "target-directory", 1, 't' }, { NULL, 0, 0 } };
+    struct cp o = { 0 };
+    int c, notdir = 0, bad = 0, i, nsrc, h = 0, l = 0, p = 0;
+    const char *tdir = NULL;
+    char **srcs;
+    opts_reset();
+    while ((c = getopts(argc, argv, "rRafinvpPLHlsuTt:d", lo)))
+        switch (c) {
+        case 'r': case 'R': o.rec = 1; break;
+        case 'a': o.rec = 1; o.preserve = 1; p = 1; break;
+        case 'f': o.force = 1; o.ask = 0; break;
+        case 'i': o.ask = 1; o.keep = 0; break;
+        case 'n': o.keep = 1; o.ask = 0; break;
+        case 'v': o.verbose = 1; break;
+        case 'p': o.preserve = 1; break;
+        case 'P': p = 1; l = 0; h = 0; break;
+        case 'L': l = 1; p = 0; h = 0; break;
+        case 'H': h = 1; l = 0; p = 0; break;
+        case 'd': p = 1; l = 0; h = 0; break;
+        case 'l': o.hard = 1; break;
+        case 's': o.sym = 1; break;
+        case 'u': o.update = 1; break;
+        case 'T': notdir = 1; break;
+        case 't': tdir = optarg; break;
+        default: break;
+        }
+    o.um = current_umask();
+    o.follow_all = l || (!o.rec && !p);
+    o.follow_top = l || h || o.follow_all;
+    plan_dest(tdir, notdir, 1, &tdir, &srcs, &nsrc);
+    for (i = 0; i < nsrc; i++) {
+        char *dest = tdir ? dest_in(tdir, srcs[i]) : xstrdup(ops[nops - 1]);
+        o.top_ino = 0;
+        bad |= cp_one(&o, srcs[i], dest, 1);
+        free(dest);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+static int t_mv(int argc, char **argv)
+{
+    static const struct opt lo[] = {
+        { "force", 0, 'f' }, { "interactive", 0, 'i' }, { "no-clobber", 0, 'n' }, { "verbose", 0, 'v' },
+        { "update", 0, 'u' }, { "no-target-directory", 0, 'T' }, { "target-directory", 1, 't' }, { NULL, 0, 0 } };
+    int c, notdir = 0, bad = 0, i, nsrc, force = 0, ask = 0, keep = 0, verbose = 0, update = 0;
+    const char *tdir = NULL;
+    char **srcs;
+    opts_reset();
+    while ((c = getopts(argc, argv, "finvuTt:", lo)))
+        switch (c) {
+        case 'f': force = 1; ask = 0; keep = 0; break;
+        case 'i': ask = 1; force = 0; keep = 0; break;
+        case 'n': keep = 1; ask = 0; force = 0; break;
+        case 'v': verbose = 1; break;
+        case 'u': update = 1; break;
+        case 'T': notdir = 1; break;
+        case 't': tdir = optarg; break;
+        default: break;
+        }
+    plan_dest(tdir, notdir, 1, &tdir, &srcs, &nsrc);
+    for (i = 0; i < nsrc; i++) {
+        const char *src = srcs[i];
+        char *dest = tdir ? dest_in(tdir, src) : xstrdup(ops[nops - 1]);
+        struct stat s, d;
+        int have;
+        if (lstat(src, &s) < 0) { perr("cannot stat '%s'", src); bad = 1; goto next; }
+        have = lstat(dest, &d) == 0;
+        if (have && s.st_dev == d.st_dev && s.st_ino == d.st_ino && !S_ISLNK(s.st_mode)) {
+            say("'%s' and '%s' are the same file", src, dest); bad = 1; goto next;
+        }
+        if (have && S_ISDIR(d.st_mode) && !S_ISDIR(s.st_mode)) { say("cannot overwrite directory '%s' with non-directory", dest); bad = 1; goto next; }
+        if (have && !S_ISDIR(d.st_mode) && S_ISDIR(s.st_mode)) { say("cannot overwrite non-directory '%s' with directory '%s'", dest, src); bad = 1; goto next; }
+        if (have && update && s.st_mtime < d.st_mtime) goto next;
+        if (have && keep) goto next;
+        if (have && (ask || (!force && access(dest, W_OK) < 0 && !S_ISLNK(d.st_mode) && isatty(0)))) {
+            fflush(stdout);
+            fprintf(stderr, ask ? "%s: overwrite '%s'? " : "%s: replace '%s', overriding mode? ", prog, dest);
+            if (!yes_answer()) goto next;
+        }
+        if (rename(src, dest) == 0) {
+            if (verbose) printf("renamed '%s' -> '%s'\n", src, dest);
+        } else if (errno == EXDEV) {
+            struct cp o = { 0 };
+            struct rm_opts r = { 1, 0, 1, 0, 0 };
+            o.rec = 1; o.preserve = 1; o.verbose = verbose; o.um = current_umask();
+            if (have && !S_ISDIR(d.st_mode)) unlink(dest);
+            if (cp_one(&o, src, dest, 1)) { bad = 1; goto next; }
+            if (rm_entry(AT_FDCWD, src, src, &r)) bad = 1;
+        } else if (errno == EINVAL && S_ISDIR(s.st_mode)) {
+            say("cannot move '%s' to a subdirectory of itself, '%s'", src, dest); bad = 1;
+        } else { perr("cannot move '%s' to '%s'", src, dest); bad = 1; }
+next:
+        free(dest);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
 /* ---- readlink realpath ---- */
 
 static int t_readlink(int argc, char **argv)
@@ -3478,6 +3768,7 @@ static const struct applet applets[] = {
     { "chmod", t_chmod, "[OPTION]... MODE[,MODE]... FILE...", "Change the mode of each FILE to MODE." },
     { "chown", t_chown, "[OPTION]... [OWNER][:[GROUP]] FILE...", "Change the owner and/or group of each FILE." },
     { "comm", t_comm, "[OPTION]... FILE1 FILE2", "Compare sorted files FILE1 and FILE2 line by line." },
+    { "cp", t_cp, "[OPTION]... SOURCE... DEST", "Copy SOURCE to DEST, or several SOURCEs to a DIRECTORY." },
     { "cut", t_cut, "OPTION... [FILE]...", "Print selected parts of lines from each FILE." },
     { "dirname", t_dirname, "[OPTION] NAME...", "Print NAME with its last component removed." },
     { "echo", t_echo, "[-neE] [STRING]...", "Print the STRINGs, separated by spaces." },
@@ -3494,6 +3785,7 @@ static const struct applet applets[] = {
     { "mkfifo", t_mkfifo, "[OPTION]... NAME...", "Create named pipes (FIFOs) with the given NAMEs." },
     { "mknod", t_mknod, "[OPTION]... NAME TYPE [MAJOR MINOR]", "Create the special file NAME of the given TYPE." },
     { "mktemp", t_mktemp, "[OPTION]... [TEMPLATE]", "Create a temporary file or directory and print its name." },
+    { "mv", t_mv, "[OPTION]... SOURCE... DEST", "Rename SOURCE to DEST, or move SOURCEs to a DIRECTORY." },
     { "nl", t_nl, "[OPTION]... [FILE]", "Number the lines of FILE." },
     { "nproc", t_nproc, "[OPTION]...", "Print the number of processing units available." },
     { "paste", t_paste, "[OPTION]... [FILE]...", "Merge lines of files side by side." },
