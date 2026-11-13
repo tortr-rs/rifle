@@ -118,7 +118,7 @@ mkdir -p d/e; touch d/e/f d/g; $X rm -rv d | sort
 mkdir d; $X rm -d d; ls
 mkdir -p d/e; $X rm -d d
 $X rm -r .
-$X rm -rf /
+@ro $X rm -rf /
 touch a; ln -s a l; $X rm l; ls
 mkdir d; ln -s d l; $X rm -r l; ls
 # chmod
