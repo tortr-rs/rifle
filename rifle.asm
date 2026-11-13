@@ -849,9 +849,14 @@ spec_find:
     inc rdx
     jmp .l
 .yes:
-    xor ecx, ecx
+    xor ecx, ecx                    ; 0 no arg, 1 arg, 2 optional arg ("::")
     cmp byte [rdx+1], ':'
-    sete cl
+    jne .y1
+    inc ecx
+    cmp byte [rdx+2], ':'
+    jne .y1
+    inc ecx
+.y1:
     cmp eax, eax                    ; ZF=1
     ret
 .no:
@@ -892,6 +897,8 @@ opt_next:
     jne .badshort
     test ecx, ecx
     jz .ret
+    cmp ecx, 2
+    je .optshort
     cmp byte [rsi], 0
     je .nextword
     mov [optarg], rsi
@@ -906,6 +913,13 @@ opt_next:
     mov [optarg], rdx
     inc qword [g_idx]
 .ret:
+    ret
+.optshort:                          ; optional arg: only when attached, -xARG
+    mov qword [optarg], 0
+    cmp byte [rsi], 0
+    je .ret
+    mov [optarg], rsi
+    mov qword [g_sub], 0
     ret
 
 .operand:
@@ -1039,6 +1053,15 @@ opt_next:
     lea r9, [rbx+r12]               ; '=' or NUL
     test ecx, ecx
     jz .lnoarg
+    cmp ecx, 2
+    jne .lreq
+    mov qword [optarg], 0           ; optional: only --name=ARG
+    cmp byte [r9], '='
+    jne .lret
+    inc r9
+    mov [optarg], r9
+    jmp .lret
+.lreq:
     cmp byte [r9], '='
     jne .lnext
     inc r9
