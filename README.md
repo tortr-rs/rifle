@@ -22,8 +22,8 @@ What's in so far
 ----------------
 
 [ arch base32 base64 basename cat chgrp chmod chown chroot cksum comm cp cut date dd df dirname du echo egrep env
-expand expr factor false fgrep fold grep groups head hostid hostname id install join link ln logname ls md5sum mkdir
-mkfifo mknod mktemp mv nice nl nohup nproc od paste printenv printf pwd readlink realpath rm rmdir seq
+expand expr factor false fgrep find fold grep groups head hostid hostname id install join link ln logname ls md5sum mkdir
+mkfifo mknod mktemp mv nice nl nohup nproc od paste printenv printf pwd readlink realpath rm rmdir sed seq
 sha1sum sha224sum sha256sum sha384sum sha512sum shuf sleep sort split stat sum sync tac tail tee test
 timeout touch tr true truncate tsort tty uname unexpand uniq unlink wc whoami yes
 

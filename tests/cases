@@ -1427,3 +1427,226 @@ seq 12 | sed 's/$/ foo bar/' > f; $X sed '1~3a\
 seq 12 | sed 's/$/ foo bar/' > f; $X sed 's/foo/a&b/;s//Q/' f
 seq 12 | sed 's/$/ foo bar/' > f; $X sed -E 's/^(.)(.)?/\2\1/' f
 seq 12 | sed 's/$/ foo bar/' > f; $X sed -n '2{n;n;p}' f
+# find
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d d/c | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d/ | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find . | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -print0 | tr '\0' '@' | tr '@' '\n' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type d | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; ln -s f d/l; $X find d -type l
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; ln -s f d/l; $X find d -type f,l | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; ln -s f d/l; ln -s nope d/m; $X find d -xtype f | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; ln -s f d/l; ln -s nope d/m; $X find d -xtype l | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; mkfifo d/p; $X find d -type p
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type x
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name 'f' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name '[fg]' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name '?' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name 'd' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name '*' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i .hid; $X find . -name '*i*' | sort
+mkdir -p d/a/b d/c; touch d/F d/a/G; $X find d -iname 'f' | sort
+mkdir -p d/a/b d/c; touch d/F d/a/G; $X find d -name 'f' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -path 'd/a*' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -path '*/b/*' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -ipath 'D/A/*' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -wholename 'd/c/?' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -maxdepth 1 | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -maxdepth 0
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -maxdepth 2 | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -mindepth 1 | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -mindepth 2 -maxdepth 2 | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -mindepth 3 | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f -maxdepth 1
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -depth | sort
+mkdir -p d/a/b; touch d/a/b/h; $X find d -depth
+mkdir -p d/a/b; touch d/a/b/h; $X find d -depth -mindepth 1
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name a -prune -o -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -path d/a -prune -o -type f -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type d -name b -prune -o -name '?' -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name a -prune | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -depth -name a -prune -o -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -o -name g | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -or -name g | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f -a -name g
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f -and -name g
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d ! -type d | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -not -type d | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d ! -name '?' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d '(' -name f -o -name g ')' -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d \( -name f -o -name g \) -type f | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f -name f -o -type d -name c | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d \( -type f -o -type d \) -name '?' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -print -o -name g | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -print -print | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -print0 -o -name g -print | tr '\0' '@' | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -true -name f
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -false
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f , -name g | sort
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -name f -quit
+mkdir -p d/a/b d/c; touch d/f d/a/g d/a/b/h d/c/i; $X find d -type f -quit | wc -l
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 0
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size -1 | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 1 | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size +1 | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 3c | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size +2c | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size -600c | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size +1k | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 1k | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size -2k | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size +0 | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 2b | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size 1M | sort
+mkdir -p d; printf 'abc' > d/three; printf '' > d/zero; head -c 1500 /dev/zero > d/big; head -c 600 /dev/zero > d/mid; $X find d -type f -size +1w | sort
+mkdir -p d; printf 'abc' > d/three; $X find d -size 3x
+mkdir -p d; printf 'abc' > d/three; $X find d -size
+mkdir -p d; printf 'abc' > d/three; $X find d -size abc
+mkdir -p d/e; touch d/f; : > d/g; echo x > d/h; $X find d -empty | sort
+mkdir -p d/e; touch d/f; : > d/g; echo x > d/h; $X find d -type f -empty | sort
+mkdir -p d/e; touch d/f; : > d/g; echo x > d/h; $X find d -type d -empty
+mkdir -p d/e; touch d/f; : > d/g; echo x > d/h; $X find d -not -empty | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime +2 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime -2 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime 3 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime 0 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime +0 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime +5 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mtime -5 -mtime +1 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mmin -120 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mmin +120 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -mmin -30 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -amin +100000 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -cmin -5 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -ctime 0 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -atime +1 | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -newer d/old | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f ! -newer d/old | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -newer d/nope
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -anewer d/older | sort
+mkdir -p d; touch -d '3 days ago' d/old; touch -d '1 hour ago' d/new; touch -d '10 days ago' d/older; $X find d -type f -cnewer d/old | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm 644
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm 755 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm -600 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm -u=rwx | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm /011 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm /go=w | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm -4000 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm 0 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm -0 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm /0 | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm u+x,g+r | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; chmod 700 d/x; chmod 640 d/y; chmod 4755 d/z; $X find . -type f -perm zz
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; $X find . -type f -executable | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 600 c; $X find . -type f -readable | sort
+mkdir -p d; touch a b c d/x d/y d/z; chmod 755 a; chmod 644 b; chmod 400 c; $X find . -type f -writable | sort
+touch f; $X find f -user $(id -un)
+touch f; $X find f -user nosuchuserhere
+touch f; $X find f -user $(id -u)
+touch f; $X find f -group $(id -gn)
+touch f; $X find f -group nosuchgrouphere
+touch f; $X find f -uid $(id -u)
+touch f; $X find f -uid +$(id -u)
+touch f; $X find f -uid -$(( $(id -u) + 1 ))
+touch f; $X find f -gid $(id -g)
+touch f; $X find f -nouser
+touch f; $X find f -nogroup
+touch f; ln f g; touch h; $X find . -type f -links 2 | sort
+touch f; ln f g; touch h; $X find . -type f -links 1
+touch f; ln f g; touch h; $X find . -type f -links +1 | sort
+touch f; ln f g; touch h; $X find . -type f -links -2
+touch f; ln f g; $X find . -inum $(ls -i f | cut -d' ' -f1) | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -delete; ls d
+mkdir -p d/a; touch d/a/f d/g; $X find d -name f -delete; find d | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -delete; find d | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -mindepth 1 -delete; find d
+mkdir -p d/a/b; touch d/a/f d/g; $X find d -name a -delete; echo $?; find d | sort
+mkdir -p d/a/b; touch d/a/f d/g; $X find d -name a -prune -o -name g -delete; find d | sort
+mkdir -p d/a/b; touch d/a/f d/g; $X find d/g d/a/f -delete; find d | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo {} ';' | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo got {} \; | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo {} {} \; | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo pre-{}-post \; | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo {} + | tr ' ' '\n' | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec echo x {} + | tr ' ' '\n' | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -exec test -s {} \; -print
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec test -s {} \; -print
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec grep -l x {} \;
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec grep -q x {} \; -print
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f ! -exec grep -q x {} \; -print
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec false {} \; -o -print | sort
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec false {} +; echo $?
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec true {} +; echo $?
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec nosuchcommand {} \;; echo $?
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec echo {} \; -exec echo again {} \; | sort
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec echo
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec echo {}
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec printf '%s\n' {} \; | sort
+mkdir -p d/a; touch d/a/f d/g; echo x > d/g; $X find d -type f -exec cat {} + -print | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -printf '%p\n' | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -type f -printf '%f|%h|%P\n' | sort
+mkdir -p d/a; echo xyz > d/a/f; touch d/g; $X find d -type f -printf '%s %m %y %n\n' | sort
+mkdir -p d/a; echo xyz > d/a/f; touch d/g; $X find d -printf '%y %p\n' | sort
+mkdir -p d/a; echo xyz > d/a/f; touch d/g; $X find d -type f -printf '%u %g %%\t|\\\n' | sort
+mkdir -p d/a; echo xyz > d/a/f; touch d/g; $X find d -type f -printf '%p\0' | tr '\0' ' '
+mkdir -p d/a; touch d/a/f d/g; $X find d -maxdepth
+mkdir -p d/a; touch d/a/f d/g; $X find d -maxdepth x
+mkdir -p d/a; touch d/a/f d/g; $X find d -bogus
+mkdir -p d/a; touch d/a/f d/g; $X find d -name
+mkdir -p d/a; touch d/a/f d/g; $X find d \( -name f
+mkdir -p d/a; touch d/a/f d/g; $X find d -name f \)
+mkdir -p d/a; touch d/a/f d/g; $X find d -o -name f
+mkdir -p d/a; touch d/a/f d/g; $X find d -name f -o
+mkdir -p d/a; touch d/a/f d/g; $X find d name
+mkdir -p d/a; touch d/a/f d/g; $X find nope d | sort; echo $?
+mkdir -p d/a; touch d/a/f d/g; $X find nope; echo $?
+mkdir -p d/a; touch d/a/f d/g; $X find d nope -name f | sort; echo $?
+mkdir -p d/a; touch d/a/f d/g; $X find -name f
+mkdir -p d/a; touch d/a/f d/g; $X find -type d | sort
+mkdir -p d/a; touch d/a/f d/g; $X find . -maxdepth 1 -name 'd'
+mkdir -p d/a; touch d/a/f d/g; $X find ./d -name 'a'
+mkdir -p d/a; touch d/a/f d/g; $X find d/a/ -type f
+mkdir -p d/a; touch d/a/f d/g; $X find d//a -type f
+mkdir -p d/a; touch d/a/f d/g; $X find d/g -type f
+mkdir -p d/a; touch d/a/f d/g; $X find d/g/ -type f
+mkdir -p d/a; touch d/a/f d/g; $X find d/g/x
+mkdir -p d/a; touch d/a/f d/g; chmod 000 d/a; $X find d | sort; echo $?; chmod 755 d/a
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find d | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find -L d | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find -H d | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find -H d/l | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find -P d/l | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find d/l | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find d/l/ | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find -L d -type l
+mkdir -p d/a; touch d/a/f d/g; ln -s nope d/l; $X find -L d -type l
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find d -follow | sort
+mkdir -p d/a; touch d/a/f d/g; ln -s a d/l; $X find d -type l -printf '%p %y\n'
+mkdir -p d/a; touch d/a/f d/g; $X find d -xdev | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -mount | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -noleaf | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -maxdepth 1 -type f -name g -exec echo {} \; -print
+mkdir -p d/a; touch d/a/f d/g; $X find d -type l -o -type f | sort
+mkdir -p d/a; touch d/a/f d/g; $X find d -lname 'x'
+mkdir -p d/a; touch d/a/f d/g; ln -s target d/l; $X find d -lname 'tar*'
+mkdir -p 'd/a b' d/c; touch 'd/a b/x y' d/c/z; $X find d -type f | sort
+mkdir -p 'd/a b' d/c; touch 'd/a b/x y' d/c/z; $X find d -type f -print0 | tr '\0' '@'
+mkdir -p 'd/a b' d/c; touch 'd/a b/x y' d/c/z; $X find d -name '* *' | sort
+mkdir -p 'd/a b' d/c; touch 'd/a b/x y' d/c/z; $X find d -type f -exec echo '[{}]' \; | sort
+mkdir -p d; touch d/a; $X find d -name a -o -name b -print
+mkdir -p d; touch d/a; $X find d '(' -name a ')' -exec echo {} ';'
+mkdir -p d; touch d/a; $X find d -newer d/a
+mkdir -p d; touch d/a; $X find d -name '*' -type f -size 0 -empty -perm -u+r
+mkdir -p d; touch d/a; $X find d d -type f
+mkdir -p d; touch d/a; $X find d/a d -type f
+mkdir -p d; touch d/a; $X find . d -name a | sort
+mkdir -p d; touch d/a; $X find d -mindepth 1 -maxdepth 1 -type f -delete; ls d
+mkdir -p d; touch d/a; $X find d -type f -a -print -a -name nomatch
+mkdir -p d; touch d/a; $X find d -type d -a ! -name d
+mkdir -p d; touch d/a; $X find d ! ! -type f
+mkdir -p d; touch d/a; $X find d \( ! -type d \)
+mkdir -p d; touch d/a; $X find d -type f -a \( -name a -o -name b \)

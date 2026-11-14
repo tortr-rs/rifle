@@ -8599,6 +8599,499 @@ static int t_sed(int argc, char **argv)
     return finish_stdout() ? 4 : s_status;
 }
 
+/* ---- find ---- */
+
+enum { F_AND, F_OR, F_NOT, F_COMMA, F_TRUE, F_FALSE, F_NAME, F_INAME, F_PATH, F_IPATH, F_TYPE, F_XTYPE, F_SIZE, F_TIME, F_NEWER, F_PERM,
+       F_USER, F_GROUP, F_UID, F_GID, F_EMPTY, F_LINKS, F_INUM, F_ACCESS, F_NOUSER, F_NOGROUP, F_PRUNE, F_QUIT, F_PRINT, F_PRINT0,
+       F_PRINTF, F_DELETE, F_EXEC, F_LNAME };
+
+struct fnode {
+    int op, cmp, kind, plus, argc, nbatch, batchcap;
+    struct fnode *a, *b;
+    char *s, **argv, **batch;
+    long n;
+    unsigned long long unit;
+    mode_t mode;
+    struct timespec ref;
+    size_t blen;
+};
+struct fctx { const char *path; const struct stat *st; int prune; };
+
+static char **fa;
+static int fi, fn_, f_depth, f_given_depth, f_xdev, f_follow, f_status, f_quit;
+static long f_min = 0, f_max = 1 << 30;
+static time_t f_now;
+static struct fnode **f_plus;
+static int f_nplus;
+
+static __attribute__((noreturn)) void fdie(const char *fmt, ...)
+{
+    va_list ap;
+    fprintf(stderr, "find: ");
+    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+    fputc('\n', stderr);
+    exit(1);
+}
+
+static struct fnode *fnew(int op, struct fnode *a, struct fnode *b)
+{
+    struct fnode *n = xmalloc(sizeof *n);
+    memset(n, 0, sizeof *n);
+    n->op = op; n->a = a; n->b = b;
+    return n;
+}
+
+static char *farg(const char *name)
+{
+    if (fi >= fn_) fdie("missing argument to `%s'", name);
+    return fa[fi++];
+}
+
+static int fcmp(const char **s)
+{
+    int cmp = 0;
+    if (**s == '+') { cmp = 1; (*s)++; } else if (**s == '-') { cmp = -1; (*s)++; }
+    return cmp;
+}
+static long fnum(const char *s, const char *name)
+{
+    char *end;
+    long v = strtol(s, &end, 10);
+    if (!isdigit((unsigned char)*s) || *end) fdie("invalid argument `%s' to " "%s", s, name);
+    return v;
+}
+
+static struct fnode *f_or(void);
+
+static struct fnode *f_primary(void)
+{
+    const char *t, *a;
+    struct fnode *n;
+    if (fi >= fn_) fdie("invalid expression; expected an expression after `%s'", fi ? fa[fi - 1] : "find");
+    t = fa[fi++];
+    if (!strcmp(t, "(")) {
+        n = f_or();
+        if (fi >= fn_ || strcmp(fa[fi], ")")) fdie("invalid expression; I was expecting to find a ')' somewhere but did not see one.");
+        fi++;
+        return n;
+    }
+    if (!strcmp(t, "!") || !strcmp(t, "-not")) { n = f_primary(); return fnew(F_NOT, n, NULL); }
+    if (!strcmp(t, "-true")) return fnew(F_TRUE, NULL, NULL);
+    if (!strcmp(t, "-false")) return fnew(F_FALSE, NULL, NULL);
+    if (!strcmp(t, "-name") || !strcmp(t, "-iname") || !strcmp(t, "-path") || !strcmp(t, "-ipath") || !strcmp(t, "-wholename") || !strcmp(t, "-iwholename") || !strcmp(t, "-lname")) {
+        int ic = t[1] == 'i';
+        n = fnew(!strcmp(t, "-lname") ? F_LNAME : t[1 + ic] == 'n' ? (ic ? F_INAME : F_NAME) : (ic ? F_IPATH : F_PATH), NULL, NULL);
+        n->s = xstrdup(farg(t));
+        if (ic) { char *p; for (p = n->s; *p; p++) *p = tolower((unsigned char)*p); }
+        return n;
+    }
+    if (!strcmp(t, "-type") || !strcmp(t, "-xtype")) {
+        n = fnew(t[1] == 'x' ? F_XTYPE : F_TYPE, NULL, NULL);
+        n->s = xstrdup(farg(t));
+        for (a = n->s; *a; a++) {
+            if (!strchr("bcdpfls", *a)) fdie("Unknown argument to -type: %s", a);
+            if (a[1] && a[1] != ',') fdie("Must separate multiple arguments to -type using: ','");
+            if (a[1]) a++;
+        }
+        return n;
+    }
+    if (!strcmp(t, "-size")) {
+        const char *s = farg(t);
+        char *end;
+        n = fnew(F_SIZE, NULL, NULL);
+        n->cmp = fcmp(&s);
+        if (!isdigit((unsigned char)*s)) fdie("invalid argument `%s' to -size", s);
+        n->n = strtol(s, &end, 10);
+        n->unit = 512;
+        if (*end) {
+            if (end[1]) fdie("invalid -size type `%s'", end);
+            switch (*end) {
+            case 'c': n->unit = 1; break; case 'w': n->unit = 2; break; case 'b': n->unit = 512; break;
+            case 'k': n->unit = 1024; break; case 'M': n->unit = 1 << 20; break; case 'G': n->unit = 1 << 30; break;
+            default: fdie("invalid -size type `%s'", end);
+            }
+        }
+        return n;
+    }
+    if (t[0] == '-' && (!strcmp(t + 2, "time") || !strcmp(t + 2, "min")) && strchr("mac", t[1])) {
+        const char *s = farg(t);
+        n = fnew(F_TIME, NULL, NULL);
+        n->kind = t[1];
+        n->unit = t[2] == 't' ? 86400 : 60;
+        n->cmp = fcmp(&s);
+        n->n = fnum(s, t);
+        return n;
+    }
+    if (!strcmp(t, "-newer") || !strcmp(t, "-anewer") || !strcmp(t, "-cnewer")) {
+        struct stat st;
+        const char *f = farg(t);
+        n = fnew(F_NEWER, NULL, NULL);
+        n->kind = t[1] == 'n' ? 'm' : t[1];
+        if ((f_follow ? stat(f, &st) : lstat(f, &st)) < 0) { fprintf(stderr, "find: '%s': %s\n", f, strerror(errno)); exit(1); }
+        n->ref.tv_sec = st.st_mtime;
+        n->ref.tv_nsec = st.st_mtime_nsec;
+        return n;
+    }
+    if (!strcmp(t, "-perm")) {
+        const char *s = farg(t);
+        struct change *ch;
+        n = fnew(F_PERM, NULL, NULL);
+        if (*s == '-') { n->cmp = 1; s++; } else if (*s == '/' || *s == '+') { n->cmp = 2; s++; }
+        if (!(ch = mode_compile(s))) fdie("invalid mode `%s'", s);
+        n->mode = mode_apply(0, 0, 0, ch) & MODE_BITS;
+        return n;
+    }
+    if (!strcmp(t, "-user") || !strcmp(t, "-group") || !strcmp(t, "-uid") || !strcmp(t, "-gid")) {
+        const char *s = farg(t);
+        n = fnew(t[1] == 'u' ? (t[2] == 's' ? F_USER : F_UID) : (t[2] == 'r' ? F_GROUP : F_GID), NULL, NULL);
+        if (n->op == F_USER) { uid_t u; if (lookup_user(s, &u) < 0) fdie("`%s' is not the name of a known user", s); n->n = u; }
+        else if (n->op == F_GROUP) { gid_t g; if (lookup_group(s, &g) < 0) fdie("`%s' is not the name of an existing group", s); n->n = g; }
+        else { n->cmp = fcmp(&s); n->n = fnum(s, t); }
+        return n;
+    }
+    if (!strcmp(t, "-nouser")) return fnew(F_NOUSER, NULL, NULL);
+    if (!strcmp(t, "-nogroup")) return fnew(F_NOGROUP, NULL, NULL);
+    if (!strcmp(t, "-empty")) return fnew(F_EMPTY, NULL, NULL);
+    if (!strcmp(t, "-links") || !strcmp(t, "-inum")) {
+        const char *s = farg(t);
+        n = fnew(t[1] == 'l' ? F_LINKS : F_INUM, NULL, NULL);
+        n->cmp = fcmp(&s);
+        n->n = fnum(s, t);
+        return n;
+    }
+    if (!strcmp(t, "-readable") || !strcmp(t, "-writable") || !strcmp(t, "-executable")) {
+        n = fnew(F_ACCESS, NULL, NULL);
+        n->kind = t[1] == 'r' ? 4 : t[1] == 'w' ? 2 : 1;
+        return n;
+    }
+    if (!strcmp(t, "-prune")) return fnew(F_PRUNE, NULL, NULL);
+    if (!strcmp(t, "-quit")) return fnew(F_QUIT, NULL, NULL);
+    if (!strcmp(t, "-print") || !strcmp(t, "-print0")) return fnew(t[6] ? F_PRINT0 : F_PRINT, NULL, NULL);
+    if (!strcmp(t, "-printf")) { n = fnew(F_PRINTF, NULL, NULL); n->s = xstrdup(farg(t)); return n; }
+    if (!strcmp(t, "-delete")) { f_depth = 1; return fnew(F_DELETE, NULL, NULL); }
+    if (!strcmp(t, "-exec")) {
+        int start = fi;
+        n = fnew(F_EXEC, NULL, NULL);
+        while (fi < fn_ && strcmp(fa[fi], ";") && !(fi > start && !strcmp(fa[fi], "+") && !strcmp(fa[fi - 1], "{}"))) fi++;
+        if (fi >= fn_ || fi == start) fdie("missing argument to `-exec'");
+        n->plus = fa[fi][0] == '+';
+        n->argc = fi - start - n->plus;
+        n->argv = xmalloc((n->argc + 1) * sizeof *n->argv);
+        memcpy(n->argv, fa + start, n->argc * sizeof *n->argv);
+        n->argv[n->argc] = NULL;
+        fi++;
+        if (n->plus) { f_plus = xrealloc(f_plus, (f_nplus + 1) * sizeof *f_plus); f_plus[f_nplus++] = n; }
+        return n;
+    }
+    if (!strcmp(t, "-maxdepth") || !strcmp(t, "-mindepth")) {
+        long v = fnum(farg(t), t);
+        if (t[2] == 'a') f_max = v; else f_min = v;
+        return fnew(F_TRUE, NULL, NULL);
+    }
+    if (!strcmp(t, "-depth") || !strcmp(t, "-d")) { f_depth = f_given_depth = 1; return fnew(F_TRUE, NULL, NULL); }
+    if (!strcmp(t, "-xdev") || !strcmp(t, "-mount")) { f_xdev = 1; return fnew(F_TRUE, NULL, NULL); }
+    if (!strcmp(t, "-follow")) { f_follow = 2; return fnew(F_TRUE, NULL, NULL); }
+    if (!strcmp(t, "-noleaf") || !strcmp(t, "-ignore_readdir_race") || !strcmp(t, "-nowarn") || !strcmp(t, "-warn")) return fnew(F_TRUE, NULL, NULL);
+    if (t[0] == '-') fdie("unknown predicate `%s'", t);
+    fdie("paths must precede expression: `%s'", t);
+}
+
+static struct fnode *f_and(void)
+{
+    struct fnode *n = f_primary();
+    for (;;) {
+        if (fi >= fn_ || !strcmp(fa[fi], "-o") || !strcmp(fa[fi], "-or") || !strcmp(fa[fi], ")") || !strcmp(fa[fi], ",")) return n;
+        if (!strcmp(fa[fi], "-a") || !strcmp(fa[fi], "-and")) fi++;
+        n = fnew(F_AND, n, f_primary());
+    }
+}
+static struct fnode *f_or(void)
+{
+    struct fnode *n = f_and();
+    for (;;) {
+        if (fi < fn_ && (!strcmp(fa[fi], "-o") || !strcmp(fa[fi], "-or"))) { fi++; n = fnew(F_OR, n, f_and()); }
+        else if (fi < fn_ && !strcmp(fa[fi], ",")) { fi++; n = fnew(F_COMMA, n, f_and()); }
+        else return n;
+    }
+}
+
+static int f_has(struct fnode *n, int op)
+{
+    if (!n) return 0;
+    if (op < 0 ? (n->op == F_PRINT || n->op == F_PRINT0 || n->op == F_PRINTF || n->op == F_DELETE || n->op == F_EXEC) : n->op == op) return 1;
+    return f_has(n->a, op) || f_has(n->b, op);
+}
+
+static int f_run(char **argv)
+{
+    int st;
+    pid_t pid;
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) { perr("cannot fork"); return -1; }
+    if (!pid) {
+        execvp(argv[0], argv);
+        fprintf(stderr, "find: '%s': %s\n", argv[0], strerror(errno));
+        _exit(127);
+    }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) return -1;
+    return (st & 0x7f) ? -1 : (st >> 8) & 255;
+}
+
+static void f_flush(struct fnode *n)
+{
+    char **v;
+    int i;
+    if (!n->nbatch) return;
+    v = xmalloc((n->argc + n->nbatch + 1) * sizeof *v);
+    for (i = 0; i < n->argc; i++) v[i] = n->argv[i];
+    for (i = 0; i < n->nbatch; i++) v[n->argc + i] = n->batch[i];
+    v[n->argc + n->nbatch] = NULL;
+    if (f_run(v) != 0) f_status = 1;
+    for (i = 0; i < n->nbatch; i++) free(n->batch[i]);
+    n->nbatch = 0; n->blen = 0;
+    free(v);
+}
+
+static char *f_subst(const char *arg, const char *path)
+{
+    size_t pl = strlen(path), n = 0;
+    const char *p;
+    char *r, *o;
+    for (p = arg; *p; p++) if (p[0] == '{' && p[1] == '}') { n++; p++; }
+    r = o = xmalloc(strlen(arg) + n * pl + 1);
+    for (p = arg; *p; p++) {
+        if (p[0] == '{' && p[1] == '}') { memcpy(o, path, pl); o += pl; p++; }
+        else *o++ = *p;
+    }
+    *o = 0;
+    return r;
+}
+
+static void f_printf(const char *fmt, const char *path, const struct stat *st, const char *start_path)
+{
+    const char *p;
+    for (p = fmt; *p; p++) {
+        if (*p == '\\' && p[1]) {
+            p++;
+            switch (*p) {
+            case 'n': putchar('\n'); break; case 't': putchar('\t'); break; case '\\': putchar('\\'); break;
+            case '0': putchar(0); break; case 'r': putchar('\r'); break; case 'a': putchar(7); break; case 'f': putchar('\f'); break;
+            case 'v': putchar('\v'); break; case 'b': putchar('\b'); break;
+            default: putchar('\\'); putchar(*p);
+            }
+        } else if (*p == '%' && p[1]) {
+            const char *b = base_of(path);
+            p++;
+            switch (*p) {
+            case '%': putchar('%'); break;
+            case 'p': fputs(path, stdout); break;
+            case 'f': fputs(b, stdout); break;
+            case 'h': { const char *sl = strrchr(path, '/'); if (!sl) fputs(".", stdout); else if (sl == path) fputs("/", stdout); else fwrite(path, 1, sl - path, stdout); break; }
+            case 'P': { size_t l = strlen(start_path); const char *r = path + l; if (!strncmp(path, start_path, l)) { while (*r == '/') r++; fputs(r, stdout); } break; }
+            case 's': printf("%lld", (long long)st->st_size); break;
+            case 'm': printf("%o", (unsigned)(st->st_mode & 07777)); break;
+            case 'M': { char m[11]; st_perm(st->st_mode, m); fputs(m, stdout); break; }
+            case 'n': printf("%lu", (unsigned long)st->st_nlink); break;
+            case 'i': printf("%lu", (unsigned long)st->st_ino); break;
+            case 'u': fputs(user_name(st->st_uid), stdout); break;
+            case 'g': fputs(group_name(st->st_gid), stdout); break;
+            case 'U': printf("%u", (unsigned)st->st_uid); break;
+            case 'G': printf("%u", (unsigned)st->st_gid); break;
+            case 'y': putchar(S_ISDIR(st->st_mode) ? 'd' : S_ISLNK(st->st_mode) ? 'l' : S_ISREG(st->st_mode) ? 'f' : S_ISBLK(st->st_mode) ? 'b' : S_ISCHR(st->st_mode) ? 'c' : S_ISFIFO(st->st_mode) ? 'p' : 's'); break;
+            default: putchar('%'); putchar(*p);
+            }
+        } else putchar(*p);
+    }
+}
+
+static const char *f_start;
+
+static int f_eval(struct fnode *n, struct fctx *x)
+{
+    const struct stat *st = x->st;
+    switch (n->op) {
+    case F_AND: return f_eval(n->a, x) && !f_quit && f_eval(n->b, x);
+    case F_OR: return f_eval(n->a, x) || (!f_quit && f_eval(n->b, x));
+    case F_COMMA: f_eval(n->a, x); return f_eval(n->b, x);
+    case F_NOT: return !f_eval(n->a, x);
+    case F_TRUE: return 1;
+    case F_FALSE: return 0;
+    case F_NAME: case F_INAME: case F_PATH: case F_IPATH: {
+        const char *subject = n->op == F_NAME || n->op == F_INAME ? base_of(x->path) : x->path;
+        char *tmp = NULL;
+        int r;
+        if (n->op == F_INAME || n->op == F_IPATH) {
+            char *p;
+            tmp = xstrdup(subject);
+            for (p = tmp; *p; p++) *p = tolower((unsigned char)*p);
+            subject = tmp;
+        }
+        r = glob_match(n->s, subject);
+        free(tmp);
+        return r;
+    }
+    case F_LNAME: {
+        char buf[PATH_MAX];
+        ssize_t k;
+        if (!S_ISLNK(st->st_mode) || (k = readlink(x->path, buf, sizeof buf - 1)) < 0) return 0;
+        buf[k] = 0;
+        return glob_match(n->s, buf);
+    }
+    case F_TYPE: case F_XTYPE: {
+        struct stat t = *st;
+        const char *a;
+        int ty;
+        if (n->op == F_XTYPE && S_ISLNK(t.st_mode) && stat(x->path, &t) < 0) lstat(x->path, &t);
+        ty = S_ISDIR(t.st_mode) ? 'd' : S_ISREG(t.st_mode) ? 'f' : S_ISLNK(t.st_mode) ? 'l' : S_ISBLK(t.st_mode) ? 'b' : S_ISCHR(t.st_mode) ? 'c' : S_ISFIFO(t.st_mode) ? 'p' : 's';
+        for (a = n->s; *a; a++) if (*a == ty) return 1;
+        return 0;
+    }
+    case F_SIZE: {
+        long long blocks = n->unit == 1 ? st->st_size : (st->st_size + n->unit - 1) / n->unit;
+        return n->cmp > 0 ? blocks > n->n : n->cmp < 0 ? blocks < n->n : blocks == n->n;
+    }
+    case F_TIME: {
+        long long t = n->kind == 'a' ? st->st_atime : n->kind == 'c' ? st->st_ctime : st->st_mtime, age = f_now - t;
+        if (n->unit == 86400) {
+            long long d = age / 86400;
+            return n->cmp > 0 ? d > n->n : n->cmp < 0 ? d < n->n : d == n->n;
+        }
+        return n->cmp > 0 ? age > n->n * 60 : n->cmp < 0 ? age < n->n * 60 : (age > (n->n - 1) * 60 && age <= n->n * 60);
+    }
+    case F_NEWER: {
+        long s = n->kind == 'a' ? st->st_atime : n->kind == 'c' ? st->st_ctime : st->st_mtime;
+        long ns = n->kind == 'a' ? st->st_atime_nsec : n->kind == 'c' ? st->st_ctime_nsec : st->st_mtime_nsec;
+        return s > n->ref.tv_sec || (s == n->ref.tv_sec && ns > n->ref.tv_nsec);
+    }
+    case F_PERM: {
+        mode_t m = st->st_mode & MODE_BITS;
+        return n->cmp == 0 ? m == n->mode : n->cmp == 1 ? (m & n->mode) == n->mode : (!n->mode || (m & n->mode));
+    }
+    case F_USER: return st->st_uid == (uid_t)n->n;
+    case F_GROUP: return st->st_gid == (gid_t)n->n;
+    case F_UID: return n->cmp > 0 ? (long)st->st_uid > n->n : n->cmp < 0 ? (long)st->st_uid < n->n : (long)st->st_uid == n->n;
+    case F_GID: return n->cmp > 0 ? (long)st->st_gid > n->n : n->cmp < 0 ? (long)st->st_gid < n->n : (long)st->st_gid == n->n;
+    case F_NOUSER: return !getpwuid(st->st_uid);
+    case F_NOGROUP: return !getgrgid(st->st_gid);
+    case F_LINKS: return n->cmp > 0 ? (long)st->st_nlink > n->n : n->cmp < 0 ? (long)st->st_nlink < n->n : (long)st->st_nlink == n->n;
+    case F_INUM: return n->cmp > 0 ? (long)st->st_ino > n->n : n->cmp < 0 ? (long)st->st_ino < n->n : (long)st->st_ino == n->n;
+    case F_ACCESS: return access(x->path, n->kind) == 0;
+    case F_EMPTY:
+        if (S_ISREG(st->st_mode)) return st->st_size == 0;
+        if (S_ISDIR(st->st_mode)) {
+            DIR *d = opendir(x->path);
+            struct dirent *e;
+            int empty = 1;
+            if (!d) return 0;
+            while ((e = readdir(d))) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) { empty = 0; break; }
+            closedir(d);
+            return empty;
+        }
+        return 0;
+    case F_PRUNE: x->prune = 1; return 1;
+    case F_QUIT: f_quit = 1; return 1;
+    case F_PRINT: puts(x->path); return 1;
+    case F_PRINT0: fputs(x->path, stdout); putchar(0); return 1;
+    case F_PRINTF: f_printf(n->s, x->path, st, f_start); return 1;
+    case F_DELETE:
+        if (!strcmp(x->path, ".")) return 1;
+        if (S_ISDIR(st->st_mode) ? rmdir(x->path) : unlink(x->path)) { fprintf(stderr, "find: cannot delete '%s': %s\n", x->path, strerror(errno)); f_status = 1; return 0; }
+        return 1;
+    case F_EXEC:
+        if (n->plus) {
+            if (n->nbatch == n->batchcap) { n->batchcap = n->batchcap ? n->batchcap * 2 : 64; n->batch = xrealloc(n->batch, n->batchcap * sizeof *n->batch); }
+            n->batch[n->nbatch++] = xstrdup(x->path);
+            n->blen += strlen(x->path) + 1;
+            if (n->blen > 65536) f_flush(n);
+            return 1;
+        } else {
+            char **v = xmalloc((n->argc + 1) * sizeof *v);
+            int i, r;
+            for (i = 0; i < n->argc; i++) v[i] = f_subst(n->argv[i], x->path);
+            v[n->argc] = NULL;
+            r = f_run(v);
+            for (i = 0; i < n->argc; i++) free(v[i]);
+            free(v);
+            return r == 0;
+        }
+    }
+    return 0;
+}
+
+static struct fnode *f_root;
+
+static void f_walk(const char *path, int level, dev_t topdev)
+{
+    struct stat st;
+    struct fctx x;
+    int isdir;
+    if (f_quit) return;
+    if ((f_follow == 2 || (f_follow == 1 && !level) ? stat(path, &st) : lstat(path, &st)) < 0) {
+        if (f_follow && lstat(path, &st) == 0) goto ok;
+        fprintf(stderr, "find: '%s': %s\n", path, strerror(errno));
+        f_status = 1;
+        return;
+    }
+ok:
+    x.path = path; x.st = &st; x.prune = 0;
+    isdir = S_ISDIR(st.st_mode);
+    if (!f_depth && level >= f_min) f_eval(f_root, &x);
+    if (isdir && !x.prune && level < f_max && !f_quit && !(f_xdev && level && st.st_dev != topdev)) {
+        DIR *d = opendir(path);
+        if (!d) { fprintf(stderr, "find: '%s': %s\n", path, strerror(errno)); f_status = 1; }
+        else {
+            struct dirent *e;
+            char **v = NULL;
+            int n = 0, cap = 0, i;
+            while ((e = readdir(d))) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                if (n == cap) { cap = cap ? cap * 2 : 32; v = xrealloc(v, cap * sizeof *v); }
+                v[n++] = xstrdup(e->d_name);
+            }
+            closedir(d);
+            for (i = 0; i < n; i++) {
+                size_t pl = strlen(path);
+                char *child = xmalloc(pl + strlen(v[i]) + 2);
+                memcpy(child, path, pl);
+                if (pl && path[pl - 1] != '/') child[pl++] = '/';
+                strcpy(child + pl, v[i]);
+                f_walk(child, level + 1, topdev);
+                free(child); free(v[i]);
+            }
+            free(v);
+        }
+    }
+    if (f_depth && level >= f_min && !f_quit) f_eval(f_root, &x);
+}
+
+static int t_find(int argc, char **argv)
+{
+    int i, first, pend;
+    fa = argv; fn_ = argc; fi = 1;
+    while (fi < fn_ && (!strcmp(fa[fi], "-H") || !strcmp(fa[fi], "-L") || !strcmp(fa[fi], "-P"))) { f_follow = fa[fi][1] == 'L' ? 2 : fa[fi][1] == 'H'; fi++; }
+    first = fi;
+    while (fi < fn_ && (fa[fi][0] != '-' || !fa[fi][1]) && strcmp(fa[fi], "(") && strcmp(fa[fi], "!") && strcmp(fa[fi], ")") && strcmp(fa[fi], ",")) fi++;
+    pend = fi;
+    if (fi < fn_ && !strcmp(fa[fi], "--help")) { print_usage(); return 0; }
+    if (fi < fn_) {
+        f_root = f_or();
+        if (fi < fn_) fdie("unexpected extra predicate `%s'", fa[fi]);
+        if (f_has(f_root, F_DELETE) && f_has(f_root, F_PRUNE) && !f_given_depth) fdie("The -delete action automatically turns on -depth, but -prune does nothing when -depth is in effect.  If you want to carry on anyway, just explicitly use the -depth option.");
+        if (!f_has(f_root, -1)) f_root = fnew(F_AND, f_root, fnew(F_PRINT, NULL, NULL));
+    } else f_root = fnew(F_PRINT, NULL, NULL);
+    f_now = time(NULL);
+    if (pend == first) { f_start = "."; f_walk(".", 0, 0); }
+    for (i = first; i < pend && !f_quit; i++) {
+        struct stat st;
+        f_start = fa[i];
+        if (stat(fa[i], &st) < 0 && lstat(fa[i], &st) < 0) st.st_dev = 0;
+        f_walk(fa[i], 0, st.st_dev);
+    }
+    for (i = 0; i < f_nplus; i++) f_flush(f_plus[i]);
+    return finish_stdout() ? 1 : f_status;
+}
+
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
@@ -8619,6 +9112,7 @@ static const struct applet applets[] = {
     { "egrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
     { "fgrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
     { "grep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
+    { "find", t_find, "[-H] [-L] [-P] [PATH...] [EXPRESSION]", "Search for files in a directory hierarchy." },
     { "groups", t_id, "[OPTION]... [USERNAME]...", "Print the groups a user is in." },
     { "id", t_id, "[OPTION]... [USER]", "Print user and group information for the specified USER, or for the current user." },
     { "install", t_install, "[OPTION]... SOURCE... DIRECTORY", "Copy files and set attributes." },
