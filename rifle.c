@@ -73,7 +73,6 @@ static int finish_stdout(void)
 struct opt { const char *name; int arg; int val; };
 static char **ops;
 static int nops;
-static char *optarg;
 static int opt_i = 1, opt_c, opt_stop;
 
 static void opts_reset(void) { opt_i = 1; opt_c = 0; opt_stop = 0; nops = 0; optarg = NULL; }
@@ -9092,6 +9091,179 @@ static int t_find(int argc, char **argv)
     return finish_stdout() ? 1 : f_status;
 }
 
+/* ---- xargs ---- */
+
+struct xitem { char *s; int eol; };
+
+/* the input as items. by default blanks and newlines separate them, quotes and backslashes group, and a line that ends
+ * in a blank carries on into the next one. with -I only newlines separate. -0 and -d split at one byte and nothing else */
+static size_t x_items(char *d, size_t len, int delim, int onlynl, struct xitem **out, int *badquote)
+{
+    struct xitem *v = NULL;
+    size_t n = 0, cap = 0, i = 0;
+    char *b = xmalloc(len + 1);
+    while (i < len) {
+        size_t bl = 0;
+        int quote = 0, eol = 0;
+        if (delim >= 0) {
+            while (i < len && d[i] != delim) b[bl++] = d[i++];
+            i++;
+            eol = 1;
+        } else {
+            while (i < len && (d[i] == '\n' || d[i] == ' ' || d[i] == '\t')) i++;
+            if (i >= len) break;
+            while (i < len) {
+                char c = d[i];
+                if (quote) {
+                    if (c == '\n') break;
+                    if (c == quote) quote = 0; else b[bl++] = c;
+                    i++;
+                    continue;
+                }
+                if (c == '\n') { eol = 1; i++; break; }
+                if (!onlynl && (c == ' ' || c == '\t')) {
+                    while (i < len && (d[i] == ' ' || d[i] == '\t')) i++;
+                    if (i < len && d[i] == '\n') i++;
+                    break;
+                }
+                if (c == '\'' || c == '"') { quote = c; i++; continue; }
+                if (c == '\\' && i + 1 < len) { b[bl++] = d[i + 1]; i += 2; continue; }
+                b[bl++] = c; i++;
+            }
+            if (quote) { *badquote = quote; break; }
+            if (i >= len) eol = 1;
+        }
+        if (*badquote) break;
+        if (n == cap) { cap = cap ? cap * 2 : 64; v = xrealloc(v, cap * sizeof *v); }
+        b[bl] = 0;
+        v[n].s = xstrdup(b); v[n].eol = eol; n++;
+    }
+    free(b);
+    *out = v;
+    return n;
+}
+
+static void xq_die(int quote)
+{
+    die(1, "unmatched %s quote; by default quotes are special to xargs unless you use the -0 option", quote == '"' ? "double" : "single");
+}
+
+static int x_exec(char **argv, int verbose)
+{
+    int st, i;
+    pid_t pid;
+    if (verbose) { for (i = 0; argv[i]; i++) fprintf(stderr, "%s%s", i ? " " : "", argv[i]); fputc('\n', stderr); }
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) die(1, "cannot fork: %s", strerror(errno));
+    if (!pid) {
+        execvp(argv[0], argv);
+        fprintf(stderr, "%s: failed to run command '%s': %s\n", prog, argv[0], strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) die(1, "waitpid: %s", strerror(errno));
+    if (st & 0x7f) die(125, "%s: terminated by signal %d", argv[0], st & 0x7f);
+    st = (st >> 8) & 255;
+    if (st == 126 || st == 127) exit(st);
+    if (st == 255) die(124, "%s: exited with status 255; aborting", argv[0]);
+    return st;
+}
+
+static int t_xargs(int argc, char **argv)
+{
+    static const struct opt lo[] = {
+        { "null", 0, '0' }, { "arg-file", 1, 'a' }, { "delimiter", 1, 'd' }, { "eof", 2, 'e' }, { "replace", 2, 'i' }, { "max-lines", 2, 'l' },
+        { "max-args", 1, 'n' }, { "max-procs", 1, 'P' }, { "no-run-if-empty", 0, 'r' }, { "max-chars", 1, 's' }, { "verbose", 0, 't' },
+        { "exit", 0, 'x' }, { NULL, 0, 0 } };
+    int c, delim = -1, norun = 0, verbose = 0, exitbig = 0, fd = 0, status = 0, ncmd, i, badquote = 0;
+    const char *repl = NULL, *eofs = NULL;
+    unsigned long maxargs = 0, maxlines = 0, maxchars = 131072, v;
+    char **cmd, *d;
+    size_t len, n, k, cmdsize = 0;
+    struct xitem *it;
+    usage_status = 1;
+    opts_reset();
+    while ((c = getopts(argc, argv, "+0a:d:E:e::I:i::L:l::n:P:rs:tx", lo)))
+        switch (c) {
+        case '0': delim = 0; break;
+        case 'a': fd = open(optarg, O_RDONLY); if (fd < 0) die(1, "Cannot open input file '%s': %s", optarg, strerror(errno)); break;
+        case 'd':
+            if (!strcmp(optarg, "\\n")) delim = '\n'; else if (!strcmp(optarg, "\\t")) delim = '\t'; else if (!strcmp(optarg, "\\0")) delim = 0;
+            else if (!strcmp(optarg, "\\\\")) delim = '\\'; else if (strlen(optarg) == 1) delim = (unsigned char)optarg[0];
+            else die(1, "Invalid input delimiter specification %s: the delimiter must be either a single character or an escape sequence starting with \\", optarg);
+            break;
+        case 'E': eofs = optarg; break;
+        case 'e': eofs = optarg && *optarg ? optarg : NULL; break;
+        case 'I': repl = optarg; maxlines = 1; maxargs = 0; break;
+        case 'i': repl = optarg ? optarg : "{}"; maxlines = 1; maxargs = 0; break;
+        case 'L': case 'l':
+            if (optarg) { if (!parse_ulong(optarg, &v) || !v) die(1, "invalid number for -%c option", c); maxlines = v; } else maxlines = 1;
+            maxargs = 0; repl = NULL;
+            break;
+        case 'n': if (!parse_ulong(optarg, &v) || !v) die(1, "invalid number for -n option"); maxargs = v; maxlines = 0; repl = NULL; break;
+        case 's': if (!parse_ulong(optarg, &maxchars)) die(1, "invalid number for -s option"); break;
+        case 'r': norun = 1; break;
+        case 't': verbose = 1; break;
+        case 'x': exitbig = 1; break;
+        case 'P': break;
+        }
+    ncmd = nops ? nops : 1;
+    cmd = xmalloc((ncmd + 2) * sizeof *cmd);
+    if (nops) memcpy(cmd, ops, nops * sizeof *cmd); else cmd[0] = "echo";
+    for (i = 0; i < ncmd; i++) cmdsize += strlen(cmd[i]) + 1;
+    if (read_all(fd, &d, &len) < 0) die(1, "%s", strerror(errno));
+    n = x_items(d, len, delim, repl != NULL, &it, &badquote);
+    if (eofs && delim < 0) for (k = 0; k < n; k++) if (!strcmp(it[k].s, eofs)) { n = k; break; }
+    if (repl) {
+        for (k = 0; k < n; k++) {
+            char **av = xmalloc((ncmd + 1) * sizeof *av);
+            for (i = 0; i < ncmd; i++) {
+                const char *p = cmd[i], *hit;
+                struct sbuf b = { 0 };
+                size_t rl = strlen(repl);
+                while (*repl && (hit = strstr(p, repl))) { sb_add(&b, p, hit - p); sb_add(&b, it[k].s, strlen(it[k].s)); p = hit + rl; }
+                sb_add(&b, p, strlen(p));
+                sb_add(&b, "", 1);
+                av[i] = b.p;
+            }
+            av[ncmd] = NULL;
+            if (x_exec(av, verbose)) status = 123;
+        }
+        if (badquote) xq_die(badquote);
+        return status;
+    }
+    {
+        char **batch = xmalloc((ncmd + n + 1) * sizeof *batch);
+        size_t nb = 0, size = cmdsize, lines = 0;
+        memcpy(batch, cmd, ncmd * sizeof *batch);
+        if (cmdsize > maxchars) die(1, "can not fit single argument within argument list size limit");
+        for (k = 0; k < n; k++) {
+            size_t l = strlen(it[k].s) + 1;
+            if (nb && size + l > maxchars) {
+                if (exitbig && (maxargs || maxlines)) die(1, "argument line too long");
+                batch[ncmd + nb] = NULL;
+                if (x_exec(batch, verbose)) status = 123;
+                nb = 0; size = cmdsize; lines = 0;
+            }
+            if (size + l > maxchars) die(1, "can not fit single argument within argument list size limit");
+            batch[ncmd + nb++] = it[k].s;
+            size += l;
+            if (it[k].eol) lines++;
+            if ((maxargs && nb >= maxargs) || (maxlines && lines >= maxlines)) {
+                batch[ncmd + nb] = NULL;
+                if (x_exec(batch, verbose)) status = 123;
+                nb = 0; size = cmdsize; lines = 0;
+            }
+        }
+        if (nb || (!n && !norun && !badquote)) {
+            batch[ncmd + nb] = NULL;
+            if (x_exec(batch, verbose)) status = 123;
+        }
+    }
+    if (badquote) xq_die(badquote);
+    return status;
+}
+
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
@@ -9188,6 +9360,7 @@ static const struct applet applets[] = {
     { "unlink", t_unlink, "FILE", "Remove FILE with the unlink call." },
     { "wc", t_wc, "[OPTION]... [FILE]...", "Print newline, word, and byte counts for each FILE." },
     { "whoami", t_whoami, "", "Print the user name for the current effective user ID." },
+    { "xargs", t_xargs, "[OPTION]... COMMAND [INITIAL-ARGS]...", "Build and execute command lines from standard input." },
     { "yes", t_yes, "[STRING]...", "Repeatedly output a line with all specified STRING(s), or 'y'." },
 };
 #define NAPPLETS ((int)(sizeof applets / sizeof applets[0]))

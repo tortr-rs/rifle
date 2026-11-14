@@ -1650,3 +1650,148 @@ mkdir -p d; touch d/a; $X find d -type d -a ! -name d
 mkdir -p d; touch d/a; $X find d ! ! -type f
 mkdir -p d; touch d/a; $X find d \( ! -type d \)
 mkdir -p d; touch d/a; $X find d -type f -a \( -name a -o -name b \)
+# xargs
+printf 'a b c\n' | $X xargs echo
+printf 'a b c\n' | $X xargs
+printf 'a\nb\nc\n' | $X xargs echo
+printf 'a b\nc d\n' | $X xargs -n1 echo
+printf 'a b\nc d\n' | $X xargs -n 2 echo
+printf 'a b\nc d\ne\n' | $X xargs -n3 echo
+printf 'a b\nc d\ne\n' | $X xargs --max-args=3 echo
+printf 'a b\nc d\ne\n' | $X xargs -n0 echo; echo $?
+printf 'a b\nc d\ne\n' | $X xargs -nx echo; echo $?
+printf 'a b\nc d\n' | $X xargs echo pre
+printf 'a b\nc d\n' | $X xargs -n1 echo pre
+printf 'a b\nc d\n' | $X xargs -- echo
+printf 'a b\nc d\n' | $X xargs echo -n
+printf 'a b\nc d\n' | $X xargs -- echo -n
+printf 'a b\nc d\n' | $X xargs -n1 -- echo --
+printf '' | $X xargs echo
+printf '' | $X xargs -r echo
+printf '' | $X xargs --no-run-if-empty echo
+printf '\n\n' | $X xargs echo hi
+printf '\n  \n' | $X xargs -r echo hi
+printf '' | $X xargs -n1 echo hi
+printf '' | $X xargs -I{} echo [{}]
+printf '' | $X xargs -L1 echo hi
+printf 'a b\n' | $X xargs -I{} echo [{}]
+printf 'a\nb\n' | $X xargs -I{} echo [{}] {}
+printf 'a\n\nb\n' | $X xargs -I{} echo [{}]
+printf '  a b  \nc\n' | $X xargs -I{} echo '[{}]'
+printf 'a\nb\n' | $X xargs -I X echo X-X
+printf 'a\nb\n' | $X xargs -i echo [{}]
+printf 'a\nb\n' | $X xargs -iZ echo Z.Z
+printf 'a\nb\n' | $X xargs --replace echo {}!
+printf 'a\nb\n' | $X xargs --replace=% echo %%
+printf 'a\nb\n' | $X xargs -I{} echo x
+printf 'a\nb\n' | $X xargs -I{} echo {} {} {}
+printf 'a\nb\n' | $X xargs -I{} -n2 echo {}
+printf 'a b\nc\n' | $X xargs -L1 echo
+printf 'a b\nc\n' | $X xargs -L 2 echo
+printf 'a b\nc \nd\n' | $X xargs -L1 echo X
+printf 'a b\nc \nd\n' | $X xargs -L2 echo X
+printf 'a b\nc d\ne f\n' | $X xargs -l echo
+printf 'a b\nc d\ne f\n' | $X xargs -l2 echo
+printf 'a b\nc d\ne f\n' | $X xargs --max-lines=2 echo
+printf 'a b\nc d\ne f\n' | $X xargs --max-lines echo
+printf 'a b\nc d\ne f\n' | $X xargs -L0 echo; echo $?
+printf 'a b\nc d\ne f\n' | $X xargs -L1 -n5 echo
+printf 'a b\nc d\ne f\n' | $X xargs -n5 -L1 echo
+printf "a 'b c' \"d e\" f\\\\ g\n" | $X xargs -n1 echo
+printf "a 'b c' \"d e\" f\\\\ g\n" | $X xargs -n1 printf '[%s]\n'
+printf "a'b\n" | $X xargs echo; echo $?
+printf 'a"b\n' | $X xargs echo; echo $?
+printf "a 'b\n" | $X xargs echo; echo $?
+printf 'a\\ b\n' | $X xargs -n1 echo
+printf "''\n" | $X xargs -n1 printf '[%s]\n'
+printf '""\n' | $X xargs printf '[%s]\n'
+printf "a''b\n" | $X xargs printf '[%s]\n'
+printf 'a\\\nb\n' | $X xargs printf '[%s]\n'
+printf "a 'b\\\\'c' d\n" | $X xargs printf '[%s]\n'
+printf '"a\\"b"\n' | $X xargs printf '[%s]\n'
+printf 'a\tb\n' | $X xargs -n1 echo
+printf 'a b' | $X xargs -n1 echo
+printf 'a b c' | $X xargs -s 8 echo
+printf 'a b c' | $X xargs -s 9 echo
+printf 'a b c' | $X xargs -s 7 echo
+printf 'a b c' | $X xargs -s 20 echo
+printf 'a b c' | $X xargs --max-chars=11 echo
+printf 'a b c' | $X xargs -x -s 4 echo; echo $?
+printf 'a b c' | $X xargs -x -s 9 echo; echo $?
+printf 'a b c' | $X xargs -x -n1 echo; echo $?
+printf 'aaaa bbbb cc d\n' | $X xargs -s 14 echo
+printf 'aaaa bbbb cc d\n' | $X xargs -s 12 printf '[%s]'; echo
+printf 'aaaa bbbb cc d\n' | $X xargs -s 10 echo; echo $?
+printf 'a\nSTOP\nb\n' | $X xargs -E STOP echo
+printf 'a\nSTOP\nb\n' | $X xargs -ESTOP echo
+printf 'a\nSTOP\nb\n' | $X xargs -e STOP echo
+printf 'a\nSTOP\nb\n' | $X xargs -eSTOP echo
+printf 'a\nSTOP\nb\n' | $X xargs echo
+printf 'a b STOP c\n' | $X xargs -E STOP echo
+printf 'a b STOP c\n' | $X xargs -E STOP -n1 echo
+printf 'a\nSTOP\nb\n' | $X xargs -0 -E STOP echo | od -c | head -2
+printf 'a,b,c' | $X xargs -d, echo
+printf 'a,b,c\n' | $X xargs -d, echo
+printf 'a,b,,c' | $X xargs -d, -n1 printf '[%s]\n'
+printf 'a b,c d' | $X xargs -d, -n1 printf '[%s]\n'
+printf "a'b,c" | $X xargs -d, -n1 printf '[%s]\n'
+printf 'a\nb\n' | $X xargs -d '\n' -n1 printf '[%s]\n'
+printf 'a b\nc d\n' | $X xargs -d '\n' printf '[%s]\n'
+printf 'a\tb\tc' | $X xargs -d '\t' printf '[%s]\n'
+printf 'a\\b\\c' | $X xargs -d '\\' printf '[%s]\n'
+printf 'a,b' | $X xargs -d ,, echo; echo $?
+printf 'a,b' | $X xargs -d '' echo; echo $?
+printf 'a\0b\0' | $X xargs -0 echo | od -c | head -2
+printf 'a\0b\0' | $X xargs -0 -n1 echo
+printf 'a\0b' | $X xargs -0 -n1 echo
+printf 'a\0\0b\0' | $X xargs -0 -n1 printf '[%s]\n'
+printf 'a b\0c d\0' | $X xargs -0 printf '[%s]\n'
+printf 'a\nb\0c\n' | $X xargs -0 printf '[%s]\n'
+printf "a'b\0" | $X xargs -0 printf '[%s]\n'
+printf 'a\0b\0' | $X xargs --null -n1 echo
+printf 'a\0' | $X xargs -0 -I{} echo [{}]
+printf 'a b\0c d\0' | $X xargs -0 -I{} echo [{}]
+printf 'a b\0c d\0' | $X xargs -0 -L1 echo
+printf 'a\nb\n' > in; $X xargs -a in echo
+printf 'a\nb\n' > in; $X xargs --arg-file=in -n1 echo
+printf 'a\nb\n' > in; $X xargs -a nope echo; echo $?
+printf 'a\nb\n' > in; $X xargs -a in -a in2 echo; echo $?
+printf 'a\nb\n' | $X xargs -P 2 -n1 echo | sort
+printf 'a\nb\n' | $X xargs -P1 -n1 echo
+printf 'a\nb\n' | $X xargs -n1 sh -c 'exit 1'; echo $?
+printf 'a\nb\n' | $X xargs -n1 false; echo $?
+printf 'a\nb\n' | $X xargs -n1 true; echo $?
+printf 'a\nb\n' | $X xargs false; echo $?
+printf 'a\nb\n' | $X xargs nosuchcommand; echo $?
+printf 'a\nb\n' | $X xargs -n1 nosuchcommand; echo $?
+printf 'a\nb\n' | $X xargs /; echo $?
+printf 'a\nb\n' | $X xargs -n1 sh -c 'exit 255'; echo $?
+printf 'a\nb\n' | $X xargs -n1 sh -c 'kill -9 $$'; echo $?
+printf 'a\nb\n' | $X xargs -n1 sh -c 'echo $1; test $1 = a' x; echo $?
+printf 'a\nb\n' | $X xargs -n1 -t echo 2>&1
+printf 'a\nb\n' | $X xargs -t echo 2>/dev/null
+printf 'a\nb\n' | $X xargs --verbose -n1 echo 2>&1
+printf 'a\nb\n' | $X xargs --bogus echo; echo $?
+printf 'a\nb\n' | $X xargs -z echo; echo $?
+printf 'a\nb\n' | $X xargs -n; echo $?
+printf 'x y\n' | $X xargs -I{} sh -c 'echo "{}"'
+printf 'a b\n' | $X xargs echo '' x
+printf 'a b\n' | $X xargs echo '{}'
+printf 'a b\n' | $X xargs printf '[%s]\n' 'with space'
+printf 'a b\n' | $X xargs -n1 printf '[%s][%s]\n' pre
+printf 'a b\n' | $X xargs -L1 -I{} echo {}
+printf 'a b\nc d\n' | $X xargs -L1 -I{} echo [{}]
+printf 'one\ntwo\n' | $X xargs -n1 echo | $X xargs echo
+mkdir d; touch d/a d/b; find d -type f -print0 | $X xargs -0 echo | tr ' ' '\n' | sort
+mkdir d; touch d/a d/b; find d -type f | $X xargs -n1 echo | sort
+mkdir d; touch 'd/a b' d/c; find d -type f -print0 | $X xargs -0 -n1 echo | sort
+mkdir d; touch 'd/a b' d/c; find d -type f -print0 | $X xargs -0 -I{} echo '<{}>' | sort
+mkdir d; touch d/a d/b; echo hi > d/a; find d -type f | $X xargs grep -l hi
+mkdir d; touch d/a d/b; echo hi > d/a; find d -type f | $X xargs grep -c hi | sort
+mkdir d; touch d/a d/b; find d -type f | $X xargs rm; find d
+mkdir d; touch d/a d/b; find d -type f | $X xargs -I{} mv {} {}.bak; find d | sort
+mkdir d; touch d/a d/b; find d -type f | $X xargs ls d/a; echo $?
+printf '1\n2\n3\n4\n5\n6\n7\n' | $X xargs -n3 echo
+seq 1 5000 | $X echo | wc -l
+seq 1 5000 | $X echo | wc -c
+seq 1 40000 | $X echo | wc -l

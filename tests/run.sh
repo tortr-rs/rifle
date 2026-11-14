@@ -21,7 +21,7 @@ while IFS= read -r c; do
 	esac
 	rm -rf "$T/g" "$T/r"; mkdir "$T/g" "$T/r"
 	(cd "$T/g" && X="/usr/bin/env --" PATH=/usr/bin:/bin $ro sh -c "$c" </dev/null >"$T/g.out" 2>"$T/g.err"; echo "exit $?" >>"$T/g.out")
-	(cd "$T/r" && X="/usr/bin/env PATH=$BIN" PATH=/usr/bin:/bin $ro sh -c "$c" </dev/null >"$T/r.out" 2>"$T/r.err"; echo "exit $?" >>"$T/r.out")
+	(cd "$T/r" && X="/usr/bin/env PATH=$BIN:/usr/bin:/bin" PATH=/usr/bin:/bin $ro sh -c "$c" </dev/null >"$T/r.out" 2>"$T/r.err"; echo "exit $?" >>"$T/r.out")
 	if cmp -s "$T/g.out" "$T/r.out"; then
 		pass=$((pass+1))
 	else
