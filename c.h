@@ -465,6 +465,7 @@ int isupper(int c) { return c >= 'A' && c <= 'Z'; }
 int islower(int c) { return c >= 'a' && c <= 'z'; }
 int isxdigit(int c) { return isdigit(c) || ((c | 32) >= 'a' && (c | 32) <= 'f'); }
 int isprint(int c) { return c >= 32 && c < 127; }
+int ispunct(int c) { return isprint(c) && c != ' ' && !isalnum(c); }   /* [rifle] */
 int toupper(int c) { return islower(c) ? c - 32 : c; }
 int tolower(int c) { return isupper(c) ? c + 32 : c; }
 
@@ -1304,5 +1305,26 @@ void c_start(long *sp)
 #ifndef C_NO_START
 __asm__(".text\n.global _start\n_start:\n xor %rbp,%rbp\n mov %rsp,%rdi\n and $-16,%rsp\n call c_start\n hlt\n");
 #endif
+
+/* [rifle] priorities and getline */
+int strcoll(const char *a, const char *b) { return strcmp(a, b); }
+#define SYS_getpriority 140
+#define SYS_setpriority 141
+int getpriority(int which, int who) { return fail(sys2(SYS_getpriority, which, who)); }
+int setpriority(int which, int who, int prio) { return fail(sys3(SYS_setpriority, which, who, prio)); }
+ssize_t getline(char **lp, size_t *cap, FILE *f)
+{
+    size_t n = 0;
+    int c;
+    if (!*lp || !*cap) { *cap = 128; *lp = malloc(*cap); }
+    while ((c = getc(f)) != EOF) {
+        if (n + 2 > *cap) { *cap *= 2; *lp = realloc(*lp, *cap); }
+        (*lp)[n++] = c;
+        if (c == '\n') break;
+    }
+    if (!n) return -1;
+    (*lp)[n] = 0;
+    return n;
+}
 
 #endif

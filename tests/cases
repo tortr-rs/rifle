@@ -546,3 +546,303 @@ echo a >a; echo b >b; $X mv -f a b; cat b
 echo a >a; mkdir d; $X mv -t d a; ls d
 echo a >a; ln -s a l; $X mv l m; readlink m
 echo a >a; touch -d 2001-02-03 a; $X mv a b; stat -c %Y b
+$X test 1 -eq 1; echo $?
+$X test a = a -a b != c; echo $?
+$X test -n ""; echo $?
+$X test -z ""; echo $?
+$X test ! -e nothere; echo $?
+touch f; mkdir d; $X test -f f -a -d d; echo $?
+touch f; $X test -s f; echo $?
+echo x >f; $X test -s f; echo $?
+$X test 3 -lt 10; echo $?
+$X test abc -lt 10; echo $?
+$X test \( a = a \) -o b; echo $?
+$X test; echo $?
+$X test a b; echo $?
+$X [ 1 -eq 1 ]; echo $?
+$X [ 1 -eq 1; echo $?
+touch a; sleep 0.01; touch b; $X test b -nt a; echo $?
+$X printf 'hello\n'
+$X printf '%s %s\n' a b c d
+$X printf '%d %i %5d|%-5d|%05d\n' 1 2 3 4 5
+$X printf '%x %X %o %u\n' 255 255 8 3
+$X printf '%5.2f|%e|%g\n' 3.14159 1234.5 0.0001
+$X printf '%c%c\n' abc xyz
+$X printf '%10s|%-10s|%.2s\n' ab cd efgh
+$X printf '\x41\101é\n'
+$X printf '%b\n' 'a\tb\\n'
+$X printf '%s\n'
+$X printf '%d\n' abc; echo $?
+$X printf "%d\n" "'a"
+$X printf '%%\n'
+$X printf '%*d|%-*d|\n' 5 1 5 2
+$X printf '%.3s\n' abcdef
+$X printf 'a\cb'
+$X printf '%q\n' 'a b'
+$X printf -- '-%s\n' x
+$X expr 1 + 2
+$X expr 7 / 2 \* 3
+$X expr 10 % 3
+$X expr 2 \< 3
+$X expr abc \< abd
+$X expr 1 = 1 \& 2 = 2
+$X expr 0 \| 5
+$X expr '' \| ''; echo $?
+$X expr length hello
+$X expr substr hello 2 3
+$X expr index hello l
+$X expr hello : 'h.*o'
+$X expr hello : 'h\(.*\)o'
+$X expr hello : 'x'; echo $?
+$X expr 5 - 8
+$X expr 1 / 0; echo $?
+$X expr \( 1 + 2 \) \* 3
+$X expr foo : '.*'
+$X expr 'a b' : 'a b'
+$X id -u | grep -c '^[0-9]*$'
+$X id -un
+$X id -gn
+$X id -G | grep -c .
+$X id -un root
+$X id -gn root
+$X id root
+$X id nosuchuser; echo $?
+$X groups root
+$X echo abc | $X md5sum
+$X echo abc | $X sha1sum
+$X echo abc | $X sha224sum
+$X echo abc | $X sha256sum
+$X echo abc | $X sha384sum
+$X echo abc | $X sha512sum
+printf '' | $X sha256sum
+printf '' | $X md5sum
+echo abc >f; $X md5sum f; $X sha256sum --tag f
+echo abc >f; $X sha256sum f >s; $X sha256sum -c s; echo $?
+echo abc >f; $X sha256sum f >s; echo x >f; $X sha256sum -c s; echo $?
+echo abc >f; $X md5sum -b f
+head -c 200000 /dev/zero | $X sha256sum
+head -c 1000 /dev/zero | $X sha512sum
+head -c 1000 /dev/zero | $X sha1sum
+head -c 1000 /dev/zero | $X md5sum
+echo abc | $X cksum
+head -c 10000 /dev/zero | $X cksum
+echo abc | $X cksum -a sha256
+echo abc | $X sum
+echo abc | $X sum -s
+echo abc | $X base64
+printf 'YWJjCg==' | $X base64 -d
+head -c 100 /dev/zero | $X base64 -w 20
+head -c 100 /dev/zero | $X base64 -w 0
+echo abc | $X base32
+echo abc | $X base32 | $X base32 -d
+echo abcdefg | $X base64 | $X base64 --decode
+printf 'abc' | $X base64
+printf 'ab' | $X base64
+printf 'a' | $X base64
+echo hello | $X dd 2>/dev/null
+echo hello | $X dd bs=2 count=1 2>/dev/null
+echo hello | $X dd skip=2 bs=1 2>/dev/null
+echo hello | $X dd conv=ucase 2>/dev/null
+printf abcdef | $X dd bs=2 skip=1 count=1 2>/dev/null
+printf abcd | $X dd of=o 2>/dev/null; cat o
+printf abcdef >o; printf XY | $X dd of=o conv=notrunc 2>/dev/null; cat o
+printf abcdef >o; printf XY | $X dd of=o seek=2 bs=1 conv=notrunc 2>/dev/null; cat o
+printf ab | $X dd conv=swab 2>/dev/null
+printf abc | $X dd ibs=1 obs=2 2>/dev/null
+printf 'abc' | $X od -c
+printf 'abc\n' | $X od
+printf 'abc\n' | $X od -A x -t x1
+printf 'abc\n' | $X od -t d1
+printf 'abc\n' | $X od -An -tx1
+printf 'hello world foo bar\n' | $X od -c
+printf 'hello world foo bar\n' | $X od -a
+head -c 64 /dev/zero | $X od
+head -c 64 /dev/zero | $X od -v
+printf 'abcdefghij' | $X od -t x4
+printf 'abcdefghij' | $X od -t u2
+printf 'abcdefghij' | $X od -N 4 -j 2 -c
+printf '\377\376' | $X od -t d1
+printf 'abc' | $X od -x
+printf 'abc' | $X od -b
+printf 'abcd' | $X od -t o1 -t c
+printf '\000\000\200\077' | $X od -t f4
+touch a b c; mkdir d; $X ls
+touch a b .h; $X ls -a
+touch a b .h; $X ls -A
+touch a b; $X ls -l | tail -n +2 | cut -c1-10
+echo hi >a; $X ls -l a | awk '{print $5}'
+touch a b c; $X ls -r
+touch -d 2001-01-01 a; touch -d 2002-01-01 b; $X ls -t
+echo 1 >a; echo 12345 >b; $X ls -S
+touch a; mkdir d; $X ls -F
+touch a; mkdir d; $X ls -p
+touch a; ln -s a l; $X ls -l | awk '{print $1, $NF}'
+touch a; ln -s a l; $X ls -lF | awk '{print $9, $10, $11}'
+mkdir -p d/e; touch d/f d/e/g; $X ls -R
+mkdir -p d/e; touch d/f; $X ls -R d
+mkdir d; $X ls -d d
+mkdir d; touch d/a; $X ls d nothere; echo $?
+touch a b; $X ls a b
+touch a b; $X ls -1
+touch a b c; COLUMNS=20 $X ls -C
+touch a b c; COLUMNS=20 $X ls -x
+touch a b c; $X ls -m
+touch a b; $X ls -i | awk '{print NF}'
+echo hi >a; $X ls -s
+touch -d 2001-02-03 a; $X ls -l --time-style=long-iso a | awk '{print $6, $7}'
+touch -d 2001-02-03 a; $X ls -l a | awk '{print $6, $7, $8}'
+touch -d 2001-02-03 a; $X ls -l --full-time a | awk '{print $6, $7}'
+touch b a10 a2; $X ls -v
+touch a b; $X ls --group-directories-first
+touch a.c b.a; $X ls -X
+touch a b c; $X ls -I 'b*'
+touch a b; $X ls -n | tail -n +2 | wc -l
+touch a; $X ls -lh a | awk '{print $5}'
+head -c 5000 /dev/zero >a; $X ls -lh a | awk '{print $5}'
+head -c 3000000 /dev/zero >a; $X ls -lh a | awk '{print $5}'
+head -c 5000 /dev/zero >a; $X ls -l --si a | awk '{print $5}'
+mkdir d; touch d/x; $X ls -l d | head -1
+touch a; $X ls -l nothere a; echo $?
+echo hi >a; $X stat -c %s a
+echo hi >a; chmod 640 a; $X stat -c '%a %A %F' a
+echo hi >a; $X stat -c '%n %h %U %G' a
+echo hi >a; $X stat --printf '%s\n' a
+echo hi >a; ln -s a l; $X stat -c %N l
+echo hi >a; ln -s a l; $X stat -L -c %F l
+touch -d @1000000000 a; $X stat -c '%X %Y' a
+touch -d 2001-02-03 a; $X stat -c %y a
+mkdir d; $X stat -c %F d
+$X stat -c %F /dev/null
+$X stat nothere; echo $?
+echo hi >a; $X stat -c '%10s|%-10s|' a a
+echo hi >a; $X stat -c '%i' a | grep -c '^[0-9]*$'
+echo hi >a; $X stat -c %b a
+mkdir -p d/e; echo hi >d/e/f; $X du -a d | sort
+mkdir -p d/e; echo hi >d/e/f; $X du d | sort
+mkdir -p d/e; echo hi >d/e/f; $X du -s d
+mkdir -p d/e; echo hi >d/e/f; $X du -sk d
+mkdir -p d/e; echo hi >d/e/f; $X du -sh d
+mkdir -p d/e; echo hi >d/e/f; $X du -sb d
+mkdir -p d/e; echo hi >d/e/f; $X du -b d | sort
+mkdir -p d/e; echo hi >d/e/f; $X du -d 0 d
+mkdir -p d/e; echo hi >d/e/f; $X du -c d | tail -1
+head -c 100000 /dev/zero >f; $X du f
+head -c 100000 /dev/zero >f; $X du -h f
+head -c 100000 /dev/zero >f; $X du --apparent-size f
+head -c 100000 /dev/zero >f; ln f g; $X du -c f g
+$X du nothere; echo $?
+mkdir d; echo hi >d/a; $X du -a d | sort
+$X df / | awk 'NR==1{print $1,$2,$3,$4,$5,$6,$7,$8}'
+$X df -P / | awk 'NR==1{print NF}'
+$X df -h / | awk 'NR==1{print $2}'
+$X df / | awk 'NR==2{print $NF}'
+$X df -T / | awk 'NR==1{print $2}'
+$X df nothere; echo $?
+$X date -d @1000000000 +%Y-%m-%d
+$X date -u -d @1000000000
+$X date -d '2001-02-03 04:05:06' +%s
+$X date -d @0 '+%A %B %d %j %U %W %u %w %y %C %e %k %l %p %I'
+$X date -d '2001-02-03 04:05:06' -I
+$X date -d '2001-02-03 04:05:06' -R
+$X date -d '2001-02-03 04:05:06' -Iseconds
+$X date -d '2001-02-03 04:05:06' '+%F %T %D %R %r'
+touch -d 2001-02-03 f; $X date -r f +%F
+$X date -d '2001-02-03 04:05:06.123456789' +%N
+$X date -d @1000000000 '+%%|%n|%t|'
+$X date -d garbage; echo $?
+$X date +%Y | grep -c '^20'
+mkdir d; echo hi >f; $X install f d/g; cat d/g
+echo hi >f; $X install -m 600 f g; stat -c %a g
+echo hi >f; $X install -D f a/b/c; cat a/b/c
+$X install -d a/b/c; test -d a/b/c && echo ok
+$X install -d -m 700 a/b; stat -c %a a/b
+echo hi >f; echo old >g; $X install f g; cat g
+echo hi >f; mkdir d; $X install -t d f; ls d
+echo hi >f; $X install -v f g
+echo hi >f; $X install f; echo $?
+$X install nothere g; echo $?
+mkdir d; $X install d g; echo $?
+$X timeout 5 true; echo $?
+$X timeout 5 false; echo $?
+$X timeout 0.1 sleep 5; echo $?
+$X timeout -s KILL 0.1 sleep 5; echo $?
+$X timeout --preserve-status 0.1 sleep 5; echo $?
+$X timeout 5 nosuchcmd; echo $?
+$X timeout 5 /bin/sh -c 'exit 7'; echo $?
+$X timeout 0 true; echo $?
+$X timeout abc true; echo $?
+$X timeout 1; echo $?
+$X nice | grep -c '^[0-9]*$'
+$X nice -n 5 nice
+$X nice -5 nice
+$X nice -n -5 nice 2>/dev/null; echo $?
+$X nice nosuchcmd; echo $?
+$X nohup true </dev/null >/dev/null 2>&1; echo $?
+$X nohup echo hi </dev/null
+$X nohup nosuchcmd </dev/null >/dev/null 2>&1; echo $?
+$X truncate -s 10 f; stat -c %s f
+echo hello >f; $X truncate -s 3 f; cat f
+echo hello >f; $X truncate -s +10 f; stat -c %s f
+echo hello >f; $X truncate -s -2 f; stat -c %s f
+echo hello >f; $X truncate -s 1K f; stat -c %s f
+echo hello >f; echo abcdefgh >g; $X truncate -r g f; stat -c %s f
+echo hello >f; $X truncate -s '<3' f; stat -c %s f
+echo hello >f; $X truncate -s '>20' f; stat -c %s f
+echo hello >f; $X truncate -s '%4' f; stat -c %s f
+$X truncate -c -s 5 nothere; ls
+$X truncate f; echo $?
+seq 1 10 | $X split -l 3; cat xaa; cat xad
+seq 1 10 | $X split -l 3 - p; ls
+seq 1 10 | $X split -b 5; ls; cat xab
+seq 1 10 | $X split -d -l 4; ls
+seq 1 10 | $X split -a 3 -l 4; ls
+seq 1 10 | $X split -l 4 --additional-suffix=.txt; ls
+seq 1 10 | $X split -n 3; cat xaa; cat xac
+seq 1 1000 | $X split -l 1; ls | wc -l
+printf 'a\tb\n' | $X expand
+printf 'a\tb\n' | $X expand -t 4
+printf '\ta\n' | $X expand -i
+printf 'a\t\tb\n' | $X expand -t 2,5,9
+printf 'abc\td\n' | $X expand -t 4
+printf '        a\n' | $X unexpand
+printf 'a       b\n' | $X unexpand
+printf 'a       b\n' | $X unexpand -a
+printf '    a\n' | $X unexpand -t 4
+printf 'a   b\n' | $X unexpand -t 4
+printf '  \tx\n' | $X unexpand -a
+seq 1 10 | $X shuf | sort -n
+seq 1 10 | $X shuf -n 3 | wc -l
+$X shuf -e a b c | sort
+$X shuf -i 1-5 | sort
+$X shuf -i 3-3
+seq 1 3 | $X shuf -r -n 5 | wc -l
+seq 1 10 | $X shuf -n 0 | wc -l
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -a 1 f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -a 1 -a 2 f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -v 1 f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -v 2 f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -o 1.2,2.2 f g
+printf '1 a\n2 b\n3 c\n' >f; printf '1 x\n3 z\n4 w\n' >g; $X join -o 0,1.2 f g
+printf '1,a\n2,b\n' >f; printf '1,x\n2,y\n' >g; $X join -t, f g
+printf 'a 1\nb 2\n' >f; printf '1 x\n2 y\n' >g; $X join -1 2 -2 1 f g
+printf '1 a\n1 b\n' >f; printf '1 x\n1 y\n' >g; $X join f g
+printf '1 a\n2 b\n' >f; printf '1 x\n' >g; $X join -a 1 -e NONE -o 0,2.2 f g
+printf 'A 1\n' >f; printf 'a 2\n' >g; $X join -i f g
+printf 'a b\nb c\n' | $X tsort
+printf 'a b\nc d\nb c\n' | $X tsort
+printf 'a b b c a c\n' | $X tsort
+printf 'a a\n' | $X tsort
+printf 'a b\nb a\n' | $X tsort 2>/dev/null; echo $?
+printf 'a\n' | $X tsort; echo $?
+$X factor 12
+$X factor 1 2 3 4
+$X factor 100 97 1001
+$X factor 18446744073709551615
+$X factor 9223372036854775807
+$X factor 600851475143
+$X factor 18446744030759878681
+$X factor abc; echo $?
+$X factor -5; echo $?
+echo 30 | $X factor
+$X factor 0

@@ -18,10 +18,13 @@ It sorts and compares by bytes, always. No locales.
 What's in so far
 ----------------
 
-arch basename cat chgrp chmod chown comm cut dirname echo env false fold head hostid hostname link ln
-logname mkdir mkfifo mknod mktemp nl nproc paste printenv pwd readlink realpath rm rmdir seq sleep sort
-sync tac tail tee touch tr true tty uname uniq unlink wc whoami yes
+[ arch base32 base64 basename cat chgrp chmod chown chroot cksum comm cp cut date dd df dirname du echo env
+expand expr factor false fold groups head hostid hostname id install join link ln logname ls md5sum mkdir
+mkfifo mknod mktemp mv nice nl nohup nproc od paste printenv printf pwd readlink realpath rm rmdir seq
+sha1sum sha224sum sha256sum sha384sum sha512sum shuf sleep sort split stat sum sync tac tail tee test
+timeout touch tr true truncate tsort tty uname unexpand uniq unlink wc whoami yes
 
-Still to come: cp mv install ls stat id date df du dd od test expr printf the checksums, and the rest.
+Not here yet: stty, who and friends, fmt, pr, csplit, numfmt, shred, stdbuf, ptx, pathchk, dircolors.
+factor stops at 64 bits.
 
 attic/ has the first version, 29 tools in assembly.

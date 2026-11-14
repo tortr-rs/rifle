@@ -4,7 +4,7 @@
 # name, the way you'd use it, with everything else in the case (ls, find, sort...) still the system's
 # usage: tests/run.sh [pattern]
 cd "$(dirname "$0")/.."
-export LC_ALL=C
+export LC_ALL=C TZ=UTC
 BIN=$PWD/bin
 [ -x "$BIN/cat" ] || { echo 'run ./build.sh first' >&2; exit 2; }
 T=$(mktemp -d /var/tmp/rifle-test.XXXXXX)

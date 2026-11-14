@@ -132,7 +132,10 @@ static int getopts(int argc, char **argv, const char *shorts, const struct opt *
             const char *p = strchr(shorts, c);
             int last = !a[opt_c];
             if (!p || c == ':') { say("invalid option -- '%c'", c); usage_error(); }
-            if (p[1] == ':') {
+            if (p[1] == ':' && p[2] == ':') {
+                optarg = last ? NULL : a + opt_c;
+                opt_c = 0; opt_i++;
+            } else if (p[1] == ':') {
                 if (!last) { optarg = a + opt_c; opt_c = 0; opt_i++; }
                 else {
                     opt_c = 0; opt_i++;
@@ -3756,11 +3759,3310 @@ static int t_sort(int argc, char **argv)
     return finish_stdout() ? 2 : st;
 }
 
+/* ---- helpers for the later tools ---- */
+
+static int glob_match(const char *p, const char *s)
+{
+    for (; *p; p++, s++) {
+        if (*p == '*') {
+            while (p[1] == '*') p++;
+            if (!p[1]) return 1;
+            for (; *s; s++) if (glob_match(p + 1, s)) return 1;
+            return glob_match(p + 1, s);
+        }
+        if (!*s) return 0;
+        if (*p == '?') continue;
+        if (*p == '[') {
+            int neg = p[1] == '!' || p[1] == '^', ok = 0;
+            const char *q = p + 1 + neg;
+            if (*q == ']') { if (*s == ']') ok = 1; q++; }
+            for (; *q && *q != ']'; q++) {
+                if (q[1] == '-' && q[2] && q[2] != ']') { if ((unsigned char)*s >= (unsigned char)q[0] && (unsigned char)*s <= (unsigned char)q[2]) ok = 1; q += 2; }
+                else if (*q == *s) ok = 1;
+            }
+            if (!*q || ok == neg) return 0;
+            p = q;
+            continue;
+        }
+        if (*p == '\\' && p[1]) p++;
+        if (*p != *s) return 0;
+    }
+    return !*s;
+}
+
+/* ---- test [ ---- */
+
+static char **targv;
+static int targc, tpos;
+
+static int test_or(void);
+
+static int t_binop(const char *s)
+{
+    static const char *const names[] = { "=", "==", "!=", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-nt", "-ot", "-ef", NULL };
+    int i;
+    for (i = 0; names[i]; i++) if (!strcmp(s, names[i])) return 1;
+    return 0;
+}
+
+static long long t_int(const char *s)
+{
+    char *e;
+    long long v;
+    while (isspace((unsigned char)*s)) s++;
+    errno = 0;
+    v = strtoll(s, &e, 10);
+    while (isspace((unsigned char)*e)) e++;
+    if (e == s || *e) die(2, "%s: integer expression expected", s);
+    return v;
+}
+
+static int t_unary(const char *op, const char *a)
+{
+    struct stat st;
+    int r;
+    if (!strcmp(op, "-n")) return *a != 0;
+    if (!strcmp(op, "-z")) return *a == 0;
+    if (!strcmp(op, "-t")) return isatty((int)t_int(a));
+    if (!strcmp(op, "-h") || !strcmp(op, "-L")) return lstat(a, &st) == 0 && S_ISLNK(st.st_mode);
+    r = stat(a, &st);
+    if (op[1] == 'r') return access(a, R_OK) == 0;
+    if (op[1] == 'w') return access(a, W_OK) == 0;
+    if (op[1] == 'x') return access(a, X_OK) == 0;
+    if (r < 0) return 0;
+    switch (op[1]) {
+    case 'e': return 1;
+    case 'f': return S_ISREG(st.st_mode);
+    case 'd': return S_ISDIR(st.st_mode);
+    case 'b': return S_ISBLK(st.st_mode);
+    case 'c': return S_ISCHR(st.st_mode);
+    case 'p': return S_ISFIFO(st.st_mode);
+    case 'S': return S_ISSOCK(st.st_mode);
+    case 's': return st.st_size > 0;
+    case 'u': return !!(st.st_mode & S_ISUID);
+    case 'g': return !!(st.st_mode & S_ISGID);
+    case 'k': return !!(st.st_mode & S_ISVTX);
+    case 'O': return st.st_uid == geteuid();
+    case 'G': return st.st_gid == getegid();
+    case 'N': return st.st_mtime > st.st_atime || (st.st_mtime == st.st_atime && st.st_mtime_nsec > st.st_atime_nsec);
+    }
+    return 0;
+}
+
+static int t_isunary(const char *s)
+{
+    return s[0] == '-' && s[1] && !s[2] && strchr("nzthLebcdfgkprsuwxOGNS", s[1]);
+}
+
+static int t_binary(const char *a, const char *op, const char *b)
+{
+    struct stat x, y;
+    if (!strcmp(op, "=") || !strcmp(op, "==")) return !strcmp(a, b);
+    if (!strcmp(op, "!=")) return strcmp(a, b) != 0;
+    if (!strcmp(op, "<")) return strcmp(a, b) < 0;
+    if (!strcmp(op, ">")) return strcmp(a, b) > 0;
+    if (!strcmp(op, "-nt") || !strcmp(op, "-ot")) {
+        int ha = stat(a, &x) == 0, hb = stat(b, &y) == 0, nt = op[1] == 'n';
+        if (!ha || !hb) return nt ? ha && !hb : hb && !ha;
+        if (x.st_mtime != y.st_mtime) return nt ? x.st_mtime > y.st_mtime : x.st_mtime < y.st_mtime;
+        return nt ? x.st_mtime_nsec > y.st_mtime_nsec : x.st_mtime_nsec < y.st_mtime_nsec;
+    }
+    if (!strcmp(op, "-ef")) return stat(a, &x) == 0 && stat(b, &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+    {
+        long long l = t_int(a), r = t_int(b);
+        if (!strcmp(op, "-eq")) return l == r;
+        if (!strcmp(op, "-ne")) return l != r;
+        if (!strcmp(op, "-lt")) return l < r;
+        if (!strcmp(op, "-le")) return l <= r;
+        if (!strcmp(op, "-gt")) return l > r;
+        return l >= r;
+    }
+}
+
+static int test_primary(void)
+{
+    char *a;
+    if (tpos >= targc) die(2, "missing argument");
+    a = targv[tpos];
+    if (!strcmp(a, "(") && !(tpos + 2 < targc && t_binop(targv[tpos + 1]) && tpos + 3 >= targc)) {
+        int v;
+        tpos++;
+        v = test_or();
+        if (tpos >= targc || strcmp(targv[tpos], ")")) die(2, "expected ')'");
+        tpos++;
+        return v;
+    }
+    if (tpos + 2 < targc + 0 && t_binop(targv[tpos + 1])) {
+        int v = t_binary(a, targv[tpos + 1], targv[tpos + 2]);
+        tpos += 3;
+        return v;
+    }
+    if (t_isunary(a) && tpos + 1 < targc) {
+        int v = t_unary(a, targv[tpos + 1]);
+        tpos += 2;
+        return v;
+    }
+    tpos++;
+    return *a != 0;
+}
+
+static int test_not(void)
+{
+    if (tpos < targc && !strcmp(targv[tpos], "!") && tpos + 1 < targc) {
+        tpos++;
+        return !test_not();
+    }
+    return test_primary();
+}
+
+static int test_and(void)
+{
+    int v = test_not();
+    while (tpos < targc && !strcmp(targv[tpos], "-a")) { tpos++; v = test_not() && v; }
+    return v;
+}
+
+static int test_or(void)
+{
+    int v = test_and();
+    while (tpos < targc && !strcmp(targv[tpos], "-o")) { tpos++; v = test_and() || v; }
+    return v;
+}
+
+static int t_test(int argc, char **argv)
+{
+    int v;
+    targv = argv + 1; targc = argc - 1; tpos = 0;
+    if (!strcmp(prog, "[")) {
+        if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+        if (argc == 2 && !strcmp(argv[1], "--version")) { printf("[ (rifle) " VERSION "\n"); return 0; }
+        if (targc < 1 || strcmp(targv[targc - 1], "]")) die(2, "missing ']'");
+        targc--;
+    } else if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+    else if (argc == 2 && !strcmp(argv[1], "--version")) { printf("test (rifle) " VERSION "\n"); return 0; }
+    if (!targc) return 1;
+    v = test_or();
+    if (tpos < targc) die(2, "extra argument '%s'", targv[tpos]);
+    return !v;
+}
+
+/* ---- printf ---- */
+
+static int pf_status;
+
+static unsigned pf_hex(const char *p, int max, int *n)
+{
+    unsigned v = 0;
+    *n = 0;
+    while (*n < max && isxdigit((unsigned char)p[*n])) {
+        v = v * 16 + (isdigit((unsigned char)p[*n]) ? p[*n] - '0' : (p[*n] | 32) - 'a' + 10);
+        (*n)++;
+    }
+    return v;
+}
+
+static void pf_utf8(unsigned c, char *out)
+{
+    if (c < 0x80) { *out++ = c; }
+    else if (c < 0x800) { *out++ = 0xc0 | c >> 6; *out++ = 0x80 | (c & 63); }
+    else if (c < 0x10000) { *out++ = 0xe0 | c >> 12; *out++ = 0x80 | (c >> 6 & 63); *out++ = 0x80 | (c & 63); }
+    else { *out++ = 0xf0 | c >> 18; *out++ = 0x80 | (c >> 12 & 63); *out++ = 0x80 | (c >> 6 & 63); *out++ = 0x80 | (c & 63); }
+    *out = 0;
+}
+
+/* p is just past the backslash. the bytes go to out, the return is how far we got, *stop is set by \c */
+static const char *pf_esc(const char *p, int in_b, char *out, size_t *olen, int *stop)
+{
+    int n, k;
+    unsigned v;
+    *olen = 1;
+    switch (*p) {
+    case 'a': out[0] = 7; return p + 1;
+    case 'b': out[0] = 8; return p + 1;
+    case 'f': out[0] = 12; return p + 1;
+    case 'n': out[0] = 10; return p + 1;
+    case 'r': out[0] = 13; return p + 1;
+    case 't': out[0] = 9; return p + 1;
+    case 'v': out[0] = 11; return p + 1;
+    case 'e': out[0] = 27; return p + 1;
+    case '\\': out[0] = '\\'; return p + 1;
+    case '"': if (!in_b) { out[0] = '"'; return p + 1; } break;
+    case 'c': *stop = 1; *olen = 0; return p + 1;
+    case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+        v = 0; n = 0;
+        if (in_b && *p == '0') p++;
+        for (k = 0; k < 3 && p[n] >= '0' && p[n] <= '7'; k++, n++) v = v * 8 + p[n] - '0';
+        out[0] = v;
+        return p + n;
+    case 'x':
+        v = pf_hex(p + 1, 2, &n);
+        if (!n) break;
+        out[0] = v;
+        return p + 1 + n;
+    case 'u': case 'U':
+        v = pf_hex(p + 1, *p == 'u' ? 4 : 8, &n);
+        if (!n) break;
+        pf_utf8(v, out);
+        *olen = strlen(out);
+        return p + 1 + n;
+    }
+    out[0] = '\\';
+    *olen = 1;
+    return p;
+}
+
+static long long pf_num(const char *s, int is_unsigned)
+{
+    char *e;
+    long long v;
+    if (!s) return 0;
+    if (*s == '\'' || *s == '"') return (unsigned char)s[1];
+    errno = 0;
+    v = is_unsigned ? (long long)strtoull(s, &e, 0) : strtoll(s, &e, 0);
+    if (e == s) { say("'%s': expected a numeric value", s); pf_status = 1; return 0; }
+    if (*e) { say("'%s': value not completely converted", s); pf_status = 1; }
+    return v;
+}
+
+static void pf_quote(const char *s)
+{
+    int plain = 1;
+    const char *p;
+    if (!*s) { fputs("''", stdout); return; }
+    for (p = s; *p; p++) if (!isprint((unsigned char)*p)) plain = 0;
+    if (!plain) {
+        fputs("$'", stdout);
+        for (p = s; *p; p++) {
+            unsigned char c = *p;
+            if (c == '\n') fputs("\\n", stdout); else if (c == '\t') fputs("\\t", stdout);
+            else if (c == '\'' || c == '\\') printf("\\%c", c);
+            else if (c < 32 || c == 127) printf("\\%03o", c);
+            else putchar(c);
+        }
+        putchar('\'');
+        return;
+    }
+    for (p = s; *p; p++) if (!isalnum((unsigned char)*p) && !strchr("_-./:,%+=@~^", *p)) break;
+    if (!*p) { fputs(s, stdout); return; }
+    putchar('\'');
+    for (p = s; *p; p++) { if (*p == '\'') fputs("'\\''", stdout); else putchar(*p); }
+    putchar('\'');
+}
+
+static int t_printf(int argc, char **argv)
+{
+    const char *fmt;
+    char **args;
+    int nargs, ai = 0, a1 = 1;
+    if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--version")) { printf("printf (rifle) " VERSION "\n"); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "--")) a1 = 2;
+    if (a1 >= argc) { say("missing operand"); usage_error(); }
+    fmt = argv[a1];
+    args = argv + a1 + 1; nargs = argc - a1 - 1;
+    for (;;) {
+        const char *p = fmt;
+        int used = 0, stop = 0;
+        while (*p && !stop) {
+            if (*p == '\\') {
+                char b[8];
+                size_t n;
+                p = pf_esc(p + 1, 0, b, &n, &stop);
+                fwrite(b, 1, n, stdout);
+            } else if (*p != '%') putchar(*p++);
+            else {
+                char spec[64], conv;
+                int k = 0, wstar = 0, pstar = 0;
+                const char *arg;
+                long long w = 0, pr = -1;
+                p++;
+                if (*p == '%') { putchar('%'); p++; continue; }
+                spec[k++] = '%';
+                while (*p && strchr("-+ #0'", *p) && k < 20) { if (*p != '\'') spec[k++] = *p; p++; }
+                if (*p == '*') { wstar = 1; p++; if (ai < nargs) w = pf_num(args[ai++], 0); used++; }
+                else while (isdigit((unsigned char)*p) && k < 40) spec[k++] = *p++;
+                if (*p == '.') {
+                    p++;
+                    if (*p == '*') { pstar = 1; p++; if (ai < nargs) pr = pf_num(args[ai++], 0); used++; }
+                    else { pr = 0; while (isdigit((unsigned char)*p)) pr = pr * 10 + *p++ - '0'; }
+                }
+                while (*p == 'l' || *p == 'h' || *p == 'L' || *p == 'j' || *p == 'z' || *p == 't') p++;
+                conv = *p;
+                if (!conv) { say("%.*s: invalid conversion specification", (int)(p - fmt), fmt); return 1; }
+                p++;
+                if (!strchr("diouxXeEfFgGaAcsbq", conv)) { say("%%%c: invalid conversion specification", conv); return 1; }
+                used++;
+                arg = ai < nargs ? args[ai++] : NULL;
+                if (wstar) k += sprintf(spec + k, "%lld", w);
+                if (pr >= 0 || pstar) { if (pr < 0) pr = 0; k += sprintf(spec + k, ".%lld", pr); }
+                spec[k] = 0;
+                if (strchr("di", conv)) { strcat(spec, "lld"); printf(spec, pf_num(arg, 0)); }
+                else if (strchr("ouxX", conv)) { strcat(spec, "ll"); k = strlen(spec); spec[k] = conv; spec[k + 1] = 0; printf(spec, (unsigned long long)pf_num(arg, 1)); }
+                else if (strchr("eEfFgGaA", conv)) {
+                    double d = 0;
+                    if (arg) {
+                        char *e;
+                        d = strtod(arg, &e);
+                        if (e == arg) { say("'%s': expected a numeric value", arg); pf_status = 1; }
+                        else if (*e) { say("'%s': value not completely converted", arg); pf_status = 1; }
+                    }
+                    k = strlen(spec); spec[k] = conv; spec[k + 1] = 0;
+                    printf(spec, d);
+                } else if (conv == 'c') { strcat(spec, "c"); printf(spec, arg ? (unsigned char)arg[0] : 0); }
+                else if (conv == 's') { strcat(spec, "s"); printf(spec, arg ? arg : ""); }
+                else if (conv == 'q') pf_quote(arg ? arg : "");
+                else {
+                    char *buf = xmalloc((arg ? strlen(arg) : 0) + 1), *o = buf;
+                    const char *s = arg ? arg : "";
+                    while (*s && !stop) {
+                        if (*s == '\\') { char b[8]; size_t n; s = pf_esc(s + 1, 1, b, &n, &stop); memcpy(o, b, n); o += n; }
+                        else *o++ = *s++;
+                    }
+                    *o = 0;
+                    strcat(spec, "s");
+                    printf(spec, buf);
+                    free(buf);
+                }
+            }
+        }
+        if (stop || ai >= nargs || !used) break;
+    }
+    return finish_stdout() ? 1 : pf_status;
+}
+
+/* ---- expr ---- */
+
+struct ev { int num; long long n; char *s; };
+
+static char **eargv;
+static int eargc, epos;
+
+static int ev_true(const struct ev *v) { return v->num ? v->n != 0 : v->s[0] && !(strspn(v->s, "0") == strlen(v->s)); }
+static void ev_str(struct ev *v) { if (v->num) { v->s = xmalloc(24); sprintf(v->s, "%lld", v->n); v->num = 0; } }
+static int ev_isnum(struct ev *v)
+{
+    char *e;
+    if (v->num) return 1;
+    if (!*v->s) return 0;
+    v->n = strtoll(v->s, &e, 10);
+    if (*e || (!isdigit((unsigned char)v->s[0]) && v->s[0] != '-' && v->s[0] != '+')) return 0;
+    return 1;
+}
+static long long ev_int(struct ev *v) { if (!ev_isnum(v)) die(2, "non-integer argument"); return v->n; }
+
+/* a small BRE: . * [] \( \) \{ \} \+ \? \| ^ $ and backtracking through groups */
+struct re { const char *p; const char *start[10], *stop[10]; int ng; };
+struct cont { const char *after, *body; struct cont *next; int g, count, min, max; const char *at; };
+
+static const char *re_close(const char *p)
+{
+    int d = 0;
+    while (*p) {
+        if (p[0] == '\\' && p[1]) {
+            if (p[1] == '(') d++;
+            else if (p[1] == ')') { if (!d) return p; d--; }
+            p += 2;
+        } else p++;
+    }
+    return p;
+}
+
+static const char *re_atom_end(const char *p)
+{
+    if (*p == '\\' && p[1] == '(') return re_close(p + 2) + 2;
+    if (*p == '\\' && p[1]) return p + 2;
+    if (*p == '[') {
+        p++;
+        if (*p == '^') p++;
+        if (*p == ']') p++;
+        while (*p && *p != ']') {
+            if (*p == '[' && (p[1] == ':' || p[1] == '.' || p[1] == '=')) { const char *q = strstr(p + 2, p[1] == ':' ? ":]" : p[1] == '.' ? ".]" : "=]"); if (q) p = q + 1; }
+            p++;
+        }
+        return *p ? p + 1 : p;
+    }
+    return p + 1;
+}
+
+static int re_class(const char *p, const char *end, int c)
+{
+    int neg = 0, ok = 0;
+    p++;
+    if (*p == '^') { neg = 1; p++; }
+    for (; p < end - 1; p++) {
+        if (*p == '[' && p[1] == ':') {
+            const char *q = strstr(p + 2, ":]");
+            char name[16];
+            size_t l = q ? q - p - 2 : 0;
+            if (q && l < sizeof name) {
+                memcpy(name, p + 2, l); name[l] = 0;
+                if ((!strcmp(name, "alpha") && isalpha(c)) || (!strcmp(name, "digit") && isdigit(c)) || (!strcmp(name, "alnum") && isalnum(c)) ||
+                    (!strcmp(name, "upper") && isupper(c)) || (!strcmp(name, "lower") && islower(c)) || (!strcmp(name, "space") && isspace(c)) ||
+                    (!strcmp(name, "punct") && ispunct(c)) || (!strcmp(name, "xdigit") && isxdigit(c)) || (!strcmp(name, "print") && isprint(c)) ||
+                    (!strcmp(name, "blank") && (c == ' ' || c == '\t'))) ok = 1;
+                p = q + 1;
+                continue;
+            }
+        }
+        if (p[1] == '-' && p + 2 < end - 1) { if (c >= (unsigned char)p[0] && c <= (unsigned char)p[2]) ok = 1; p += 2; }
+        else if ((unsigned char)*p == c) ok = 1;
+    }
+    return ok != neg;
+}
+
+static int re_one(const char *atom, const char *aend, int c)
+{
+    if (!c) return 0;
+    if (*atom == '.') return 1;
+    if (*atom == '[') return re_class(atom, aend, c);
+    if (*atom == '\\') return (unsigned char)atom[1] == c;
+    return (unsigned char)*atom == c;
+}
+
+static const char *re_m(struct re *r, const char *p, const char *s, struct cont *k);
+
+/* the next alternative of a group body, or NULL */
+static const char *re_next_alt(const char *p)
+{
+    int d = 0;
+    while (*p) {
+        if (p[0] == '\\' && p[1]) {
+            if (p[1] == '(') d++;
+            else if (p[1] == ')') { if (!d) return NULL; d--; }
+            else if (p[1] == '|' && !d) return p + 2;
+            p += 2;
+        } else p++;
+    }
+    return NULL;
+}
+
+static const char *re_group(struct re *r, const char *body, const char *s, struct cont *k)
+{
+    const char *alt;
+    for (alt = body; alt; alt = re_next_alt(alt)) {
+        const char *res = re_m(r, alt, s, k);
+        if (res) return res;
+    }
+    return NULL;
+}
+
+static const char *re_m(struct re *r, const char *p, const char *s, struct cont *k)
+{
+    const char *aend, *rest;
+    int min = 1, max = 1;
+    if (!*p || (p[0] == '\\' && p[1] == '|')) {
+        if (!k) return s;
+        p = re_close(p);
+    }
+    if (p[0] == '\\' && p[1] == ')') {
+        int cnt;
+        if (!k) return s;
+        cnt = k->count + 1;
+        r->stop[k->g] = s;
+        if (cnt < k->max && s != k->at) {
+            struct cont nk = *k;
+            const char *res, *os = r->start[k->g];
+            nk.count = cnt; nk.at = s;
+            r->start[k->g] = s;
+            res = re_group(r, k->body, s, &nk);
+            if (res) return res;
+            r->start[k->g] = os;
+        }
+        if (cnt >= k->min) return re_m(r, k->after, s, k->next);
+        return NULL;
+    }
+    if (*p == '$' && (!p[1] || (p[1] == '\\' && (p[2] == '|' || p[2] == ')')))) return *s ? NULL : re_m(r, p + 1, s, k);
+    if (*p == '^' && p == r->p) return re_m(r, p + 1, s, k);
+    aend = re_atom_end(p);
+    rest = aend;
+    if (*aend == '*') { min = 0; max = 1 << 30; rest = aend + 1; }
+    else if (aend[0] == '\\' && aend[1] == '+') { min = 1; max = 1 << 30; rest = aend + 2; }
+    else if (aend[0] == '\\' && aend[1] == '?') { min = 0; max = 1; rest = aend + 2; }
+    else if (aend[0] == '\\' && aend[1] == '{') {
+        char *e;
+        min = strtol(aend + 2, &e, 10); max = min;
+        if (*e == ',') { e++; max = isdigit((unsigned char)*e) ? (int)strtol(e, &e, 10) : 1 << 30; }
+        rest = e + 2;
+    }
+    if (p[0] == '\\' && p[1] == '(') {
+        struct cont nk;
+        const char *res;
+        nk.after = rest; nk.body = p + 2; nk.next = k; nk.g = ++r->ng; nk.count = 0; nk.min = min; nk.max = max; nk.at = s;
+        if (max > 0) {
+            r->start[nk.g] = s;
+            res = re_group(r, nk.body, s, &nk);
+            if (res) return res;
+        }
+        if (min == 0) return re_m(r, rest, s, k);
+        return NULL;
+    }
+    {
+        int n = 0;
+        while (n < max && re_one(p, aend, (unsigned char)s[n])) n++;
+        for (; n >= min; n--) {
+            const char *res = re_m(r, rest, s + n, k);
+            if (res) return res;
+        }
+    }
+    return NULL;
+}
+
+static int re_match(const char *re, const char *s, struct ev *out)
+{
+    struct re r;
+    const char *p = re, *e = NULL, *q;
+    int has = 0;
+    memset(&r, 0, sizeof r);
+    r.p = re;
+    for (;;) {
+        r.ng = 0;
+        e = re_m(&r, p, s, NULL);
+        if (e) break;
+        p = re_next_alt(p);
+        if (!p) break;
+    }
+    for (q = re; *q; q++) { if (q[0] == '\\' && q[1] == '(') { has = 1; break; } if (q[0] == '\\' && q[1]) q++; }
+    if (has) {
+        out->num = 0;
+        if (!e || !r.stop[1] || !r.start[1]) out->s = xstrdup("");
+        else { out->s = xmalloc(r.stop[1] - r.start[1] + 1); memcpy(out->s, r.start[1], r.stop[1] - r.start[1]); out->s[r.stop[1] - r.start[1]] = 0; }
+    } else { out->num = 1; out->n = e ? e - s : 0; }
+    return e != NULL;
+}
+
+static struct ev ex_or(void);
+
+static int ex_tok(const char *t) { return epos < eargc && !strcmp(eargv[epos], t); }
+
+static struct ev ex_prim(void)
+{
+    struct ev v;
+    if (epos >= eargc) die(2, "syntax error: missing argument");
+    if (ex_tok("(")) {
+        epos++;
+        v = ex_or();
+        if (!ex_tok(")")) die(2, epos >= eargc ? "syntax error: expecting ')' after '%s'" : "syntax error: expecting ')' instead of '%s'", eargv[epos < eargc ? epos : epos - 1]);
+        epos++;
+        return v;
+    }
+    if (ex_tok("match") && epos + 2 < eargc + 0) {
+        struct ev r; v.num = 0;
+        r.num = 0; r.s = eargv[epos + 1];
+        v.s = eargv[epos + 2]; epos += 3;
+        {
+            struct ev out;
+            re_match(v.s, r.s, &out);
+            return out;
+        }
+    }
+    if (ex_tok("substr") && epos + 3 < eargc + 0) {
+        long long pos = atoll(eargv[epos + 2]), len = atoll(eargv[epos + 3]);
+        const char *s = eargv[epos + 1];
+        long long sl = strlen(s);
+        v.num = 0;
+        if (pos < 1 || len < 1 || pos > sl) v.s = xstrdup("");
+        else { if (len > sl - pos + 1) len = sl - pos + 1; v.s = xmalloc(len + 1); memcpy(v.s, s + pos - 1, len); v.s[len] = 0; }
+        epos += 4;
+        return v;
+    }
+    if (ex_tok("index") && epos + 2 < eargc + 0) {
+        const char *s = eargv[epos + 1], *c = eargv[epos + 2], *f = s + strcspn(s, c);
+        v.num = 1; v.n = *f ? f - s + 1 : 0;
+        epos += 3;
+        return v;
+    }
+    if (ex_tok("length") && epos + 1 < eargc + 0) {
+        v.num = 1; v.n = strlen(eargv[epos + 1]);
+        epos += 2;
+        return v;
+    }
+    if (ex_tok("+") && epos + 1 < eargc) epos++;
+    v.num = 0; v.s = eargv[epos++];
+    return v;
+}
+
+static struct ev ex_match(void)
+{
+    struct ev l = ex_prim();
+    while (ex_tok(":")) {
+        struct ev r, out;
+        epos++;
+        r = ex_prim();
+        ev_str(&l); ev_str(&r);
+        re_match(r.s, l.s, &out);
+        l = out;
+    }
+    return l;
+}
+
+static struct ev ex_mul(void)
+{
+    struct ev l = ex_match();
+    while (ex_tok("*") || ex_tok("/") || ex_tok("%")) {
+        char op = eargv[epos++][0];
+        struct ev r = ex_match();
+        long long a = ev_int(&l), b = ev_int(&r);
+        if (op != '*' && !b) die(2, "division by zero");
+        l.num = 1;
+        l.n = op == '*' ? a * b : op == '/' ? a / b : a % b;
+    }
+    return l;
+}
+
+static struct ev ex_add(void)
+{
+    struct ev l = ex_mul();
+    while (ex_tok("+") || ex_tok("-")) {
+        char op = eargv[epos++][0];
+        struct ev r = ex_mul();
+        long long a = ev_int(&l), b = ev_int(&r);
+        l.num = 1;
+        l.n = op == '+' ? a + b : a - b;
+    }
+    return l;
+}
+
+static struct ev ex_cmp(void)
+{
+    struct ev l = ex_add();
+    while (ex_tok("=") || ex_tok("==") || ex_tok("!=") || ex_tok("<") || ex_tok("<=") || ex_tok(">") || ex_tok(">=")) {
+        const char *op = eargv[epos++];
+        struct ev r = ex_add();
+        int c;
+        if (ev_isnum(&l) && ev_isnum(&r)) c = l.n < r.n ? -1 : l.n > r.n;
+        else { ev_str(&l); ev_str(&r); c = strcoll(l.s, r.s); }
+        l.num = 1;
+        if (!strcmp(op, "=") || !strcmp(op, "==")) l.n = c == 0;
+        else if (!strcmp(op, "!=")) l.n = c != 0;
+        else if (!strcmp(op, "<")) l.n = c < 0;
+        else if (!strcmp(op, "<=")) l.n = c <= 0;
+        else if (!strcmp(op, ">")) l.n = c > 0;
+        else l.n = c >= 0;
+    }
+    return l;
+}
+
+static struct ev ex_and(void)
+{
+    struct ev l = ex_cmp();
+    while (ex_tok("&")) {
+        struct ev r;
+        epos++;
+        r = ex_cmp();
+        if (!ev_true(&l) || !ev_true(&r)) { l.num = 1; l.n = 0; }
+    }
+    return l;
+}
+
+static struct ev ex_or(void)
+{
+    struct ev l = ex_and();
+    while (ex_tok("|")) {
+        struct ev r;
+        epos++;
+        r = ex_and();
+        if (!ev_true(&l)) l = ev_true(&r) ? r : (struct ev){ 1, 0, NULL };
+    }
+    return l;
+}
+
+static int t_expr(int argc, char **argv)
+{
+    struct ev v;
+    if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--version")) { printf("expr (rifle) " VERSION "\n"); return 0; }
+    if (argc < 2) { say("missing operand"); usage_error(); }
+    usage_status = 2;
+    eargv = argv + 1; eargc = argc - 1; epos = 0;
+    v = ex_or();
+    if (epos < eargc) die(2, "syntax error: unexpected argument '%s'", eargv[epos]);
+    if (v.num) printf("%lld\n", v.n); else printf("%s\n", v.s);
+    return finish_stdout() ? 1 : !ev_true(&v);
+}
+
+/* ---- id groups ---- */
+
+static int t_id(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "user", 0, 'u' }, { "group", 0, 'g' }, { "groups", 0, 'G' }, { "name", 0, 'n' },
+        { "real", 0, 'r' }, { "zero", 0, 'z' }, { NULL, 0, 0 } };
+    int c, u = 0, g = 0, G = 0, n = 0, r = 0, z = 0, bad = 0, ngr, i, isgroups = !strcmp(prog, "groups");
+    uid_t ruid, euid, uid;
+    gid_t rgid, egid, gid, list[256];
+    struct passwd *pw = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, isgroups ? "" : "ugGnrzaZ", lo)))
+        switch (c) {
+        case 'u': u = 1; break; case 'g': g = 1; break; case 'G': G = 1; break; case 'n': n = 1; break;
+        case 'r': r = 1; break; case 'z': z = 1; break; default: break;
+        }
+    if (isgroups) G = n = 1;
+    if (u + g + G > 1) die(1, "cannot print \"only\" of more than one choice");
+    if ((n || r) && !(u || g || G)) die(1, "cannot print only names or real IDs in default format");
+    if (z && !(u || g || G)) die(1, "option --zero not permitted in default format");
+    if (nops > 1 && !isgroups) extra_operand(ops[1]);
+    do {
+        const char *who = nops ? ops[isgroups ? bad : 0] : NULL;
+        if (who) {
+            pw = getpwnam(who);
+            if (!pw) {
+                unsigned long v;
+                if (parse_ulong(who, &v)) pw = getpwuid(v);
+            }
+            if (!pw) { say("'%s': no such user", who); return 1; }
+            ruid = euid = uid = pw->pw_uid; rgid = egid = gid = pw->pw_gid;
+            ngr = 0;
+            {
+                FILE *gf = fopen("/etc/group", "r");
+                char *gl = NULL;
+                size_t gc = 0;
+                list[ngr++] = gid;
+                while (gf && getline(&gl, &gc, gf) > 0) {
+                    char *f[4], *q = gl;
+                    int k;
+                    for (k = 0; k < 3; k++) { f[k] = q; q = strchr(q, ':'); if (!q) break; *q++ = 0; }
+                    if (k < 3) continue;
+                    f[3] = q;
+                    q[strcspn(q, "\n")] = 0;
+                    for (; f[3]; f[3] = q) {
+                        q = strchr(f[3], ',');
+                        if (q) *q++ = 0;
+                        if (!strcmp(f[3], pw->pw_name) && ngr < 256 && (gid_t)atoi(f[2]) != gid) list[ngr++] = atoi(f[2]);
+                    }
+                }
+                if (gf) fclose(gf);
+            }
+        } else {
+            ruid = getuid(); euid = geteuid(); rgid = getgid(); egid = getegid();
+            uid = r ? ruid : euid; gid = r ? rgid : egid;
+            ngr = getgroups(256, list);
+            if (ngr < 0) ngr = 0;
+        }
+        if (isgroups && nops) printf("%s : ", who);
+        if (u) printf("%s", n ? user_name(uid) : (snprintf(NULL, 0, "") , ""));
+        if (u && !n) printf("%u", uid);
+        else if (g) { if (n) printf("%s", group_name(gid)); else printf("%u", gid); }
+        else if (G) {
+            int first = 1;
+            gid_t main_g = who ? gid : egid;
+            for (i = -1; i < ngr; i++) {
+                gid_t x = i < 0 ? main_g : list[i];
+                int j, dup = 0;
+                if (i >= 0 && x == main_g) continue;
+                for (j = 0; j < i; j++) if (list[j] == x) dup = 1;
+                if (dup) continue;
+                if (!first) putchar(isgroups || n ? ' ' : z ? 0 : ' ');
+                first = 0;
+                if (n) printf("%s", group_name(x)); else printf("%u", x);
+            }
+        } else if (!u) {
+            printf("uid=%u(%s) gid=%u(%s)", ruid, user_name(ruid), rgid, group_name(rgid));
+            if (euid != ruid) printf(" euid=%u(%s)", euid, user_name(euid));
+            if (egid != rgid) printf(" egid=%u(%s)", egid, group_name(egid));
+            printf(" groups=");
+            {
+                int first = 1;
+                gid_t main_g = who ? gid : egid;
+                for (i = -1; i < ngr; i++) {
+                    gid_t x = i < 0 ? main_g : list[i];
+                    int j, dup = 0;
+                    if (i >= 0 && x == main_g) continue;
+                    for (j = 0; j < i; j++) if (list[j] == x) dup = 1;
+                    if (dup) continue;
+                    printf("%s%u(%s)", first ? "" : ",", x, group_name(x));
+                    first = 0;
+                }
+            }
+        }
+        putchar(z ? 0 : '\n');
+        bad++;
+    } while (isgroups && bad < nops);
+    return finish_stdout() ? 1 : 0;
+}
+/* ---- md5sum sha*sum cksum sum ---- */
+
+enum { A_MD5, A_SHA1, A_SHA224, A_SHA256, A_SHA384, A_SHA512 };
+
+struct hash {
+    int alg;
+    uint32_t s[8];
+    uint64_t q[8];
+    uint64_t len;
+    unsigned char buf[128];
+    size_t n;
+};
+
+#define ROL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define ROR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
+
+static const uint32_t k256[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
+    0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
+    0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
+    0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+    0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+
+static const uint64_t k512[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
+    0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL,
+    0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL, 0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
+    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL, 0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL,
+    0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL,
+    0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL, 0xca273eceea26619cULL, 0xd186b8c721c0c207ULL,
+    0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL,
+    0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL };
+
+static void md5_block(struct hash *h, const unsigned char *p)
+{
+    static const int sh[64] = { 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21 };
+    static uint32_t k[64];
+    uint32_t m[16], a = h->s[0], b = h->s[1], c = h->s[2], d = h->s[3];
+    int i;
+    if (!k[0]) {
+        static const uint32_t t[64] = { 0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+            0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340,
+            0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+            0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9,
+            0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+            0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0,
+            0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391 };
+        memcpy(k, t, sizeof k);
+    }
+    for (i = 0; i < 16; i++) m[i] = p[i * 4] | p[i * 4 + 1] << 8 | p[i * 4 + 2] << 16 | (uint32_t)p[i * 4 + 3] << 24;
+    for (i = 0; i < 64; i++) {
+        uint32_t f, t;
+        int g;
+        if (i < 16) { f = (b & c) | (~b & d); g = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
+        else { f = c ^ (b | ~d); g = (7 * i) & 15; }
+        t = d; d = c; c = b;
+        b = b + ROL(a + f + k[i] + m[g], sh[i]);
+        a = t;
+    }
+    h->s[0] += a; h->s[1] += b; h->s[2] += c; h->s[3] += d;
+}
+
+static void sha1_block(struct hash *h, const unsigned char *p)
+{
+    uint32_t w[80], a = h->s[0], b = h->s[1], c = h->s[2], d = h->s[3], e = h->s[4];
+    int i;
+    for (i = 0; i < 16; i++) w[i] = (uint32_t)p[i * 4] << 24 | p[i * 4 + 1] << 16 | p[i * 4 + 2] << 8 | p[i * 4 + 3];
+    for (i = 16; i < 80; i++) w[i] = ROL(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    for (i = 0; i < 80; i++) {
+        uint32_t f, k, t;
+        if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+        else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+        else { f = b ^ c ^ d; k = 0xca62c1d6; }
+        t = ROL(a, 5) + f + e + k + w[i];
+        e = d; d = c; c = ROL(b, 30); b = a; a = t;
+    }
+    h->s[0] += a; h->s[1] += b; h->s[2] += c; h->s[3] += d; h->s[4] += e;
+}
+
+static void sha256_block(struct hash *h, const unsigned char *p)
+{
+    uint32_t w[64], v[8];
+    int i;
+    for (i = 0; i < 16; i++) w[i] = (uint32_t)p[i * 4] << 24 | p[i * 4 + 1] << 16 | p[i * 4 + 2] << 8 | p[i * 4 + 3];
+    for (i = 16; i < 64; i++) {
+        uint32_t s0 = ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3), s1 = ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    memcpy(v, h->s, sizeof v);
+    for (i = 0; i < 64; i++) {
+        uint32_t t1 = v[7] + (ROR(v[4], 6) ^ ROR(v[4], 11) ^ ROR(v[4], 25)) + ((v[4] & v[5]) ^ (~v[4] & v[6])) + k256[i] + w[i];
+        uint32_t t2 = (ROR(v[0], 2) ^ ROR(v[0], 13) ^ ROR(v[0], 22)) + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+        v[7] = v[6]; v[6] = v[5]; v[5] = v[4]; v[4] = v[3] + t1; v[3] = v[2]; v[2] = v[1]; v[1] = v[0]; v[0] = t1 + t2;
+    }
+    for (i = 0; i < 8; i++) h->s[i] += v[i];
+}
+
+static void sha512_block(struct hash *h, const unsigned char *p)
+{
+    uint64_t w[80], v[8];
+    int i, j;
+    for (i = 0; i < 16; i++) { w[i] = 0; for (j = 0; j < 8; j++) w[i] = w[i] << 8 | p[i * 8 + j]; }
+    for (i = 16; i < 80; i++) {
+        uint64_t s0 = ROR64(w[i - 15], 1) ^ ROR64(w[i - 15], 8) ^ (w[i - 15] >> 7), s1 = ROR64(w[i - 2], 19) ^ ROR64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    memcpy(v, h->q, sizeof v);
+    for (i = 0; i < 80; i++) {
+        uint64_t t1 = v[7] + (ROR64(v[4], 14) ^ ROR64(v[4], 18) ^ ROR64(v[4], 41)) + ((v[4] & v[5]) ^ (~v[4] & v[6])) + k512[i] + w[i];
+        uint64_t t2 = (ROR64(v[0], 28) ^ ROR64(v[0], 34) ^ ROR64(v[0], 39)) + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+        v[7] = v[6]; v[6] = v[5]; v[5] = v[4]; v[4] = v[3] + t1; v[3] = v[2]; v[2] = v[1]; v[1] = v[0]; v[0] = t1 + t2;
+    }
+    for (i = 0; i < 8; i++) h->q[i] += v[i];
+}
+
+static size_t hash_bsize(int alg) { return alg >= A_SHA384 ? 128 : 64; }
+static size_t hash_size(int alg) { static const size_t n[] = { 16, 20, 28, 32, 48, 64 }; return n[alg]; }
+
+static void hash_init(struct hash *h, int alg)
+{
+    static const uint32_t i224[8] = { 0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4 };
+    static const uint32_t i256[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    static const uint64_t i384[8] = { 0xcbbb9d5dc1059ed8ULL, 0x629a292a367cd507ULL, 0x9159015a3070dd17ULL, 0x152fecd8f70e5939ULL,
+        0x67332667ffc00b31ULL, 0x8eb44a8768581511ULL, 0xdb0c2e0d64f98fa7ULL, 0x47b5481dbefa4fa4ULL };
+    static const uint64_t i512[8] = { 0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+        0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL };
+    memset(h, 0, sizeof *h);
+    h->alg = alg;
+    if (alg == A_MD5) { h->s[0] = 0x67452301; h->s[1] = 0xefcdab89; h->s[2] = 0x98badcfe; h->s[3] = 0x10325476; }
+    else if (alg == A_SHA1) { h->s[0] = 0x67452301; h->s[1] = 0xefcdab89; h->s[2] = 0x98badcfe; h->s[3] = 0x10325476; h->s[4] = 0xc3d2e1f0; }
+    else if (alg == A_SHA224) memcpy(h->s, i224, sizeof i224);
+    else if (alg == A_SHA256) memcpy(h->s, i256, sizeof i256);
+    else if (alg == A_SHA384) memcpy(h->q, i384, sizeof i384);
+    else memcpy(h->q, i512, sizeof i512);
+}
+
+static void hash_block(struct hash *h, const unsigned char *p)
+{
+    switch (h->alg) {
+    case A_MD5: md5_block(h, p); break;
+    case A_SHA1: sha1_block(h, p); break;
+    case A_SHA224: case A_SHA256: sha256_block(h, p); break;
+    default: sha512_block(h, p); break;
+    }
+}
+
+static void hash_add(struct hash *h, const void *data, size_t n)
+{
+    const unsigned char *p = data;
+    size_t bs = hash_bsize(h->alg);
+    h->len += n;
+    if (h->n) {
+        size_t take = bs - h->n < n ? bs - h->n : n;
+        memcpy(h->buf + h->n, p, take);
+        h->n += take; p += take; n -= take;
+        if (h->n == bs) { hash_block(h, h->buf); h->n = 0; }
+    }
+    while (n >= bs) { hash_block(h, p); p += bs; n -= bs; }
+    if (n) { memcpy(h->buf, p, n); h->n = n; }
+}
+
+static void hash_end(struct hash *h, unsigned char *out)
+{
+    size_t bs = hash_bsize(h->alg), lenbytes = bs == 128 ? 16 : 8;
+    uint64_t bits = h->len * 8;
+    unsigned char pad[144];
+    size_t padn = (h->n < bs - lenbytes ? bs - lenbytes - h->n : 2 * bs - lenbytes - h->n), i;
+    memset(pad, 0, sizeof pad);
+    pad[0] = 0x80;
+    for (i = 0; i < 8; i++) pad[padn + i + (lenbytes - 8)] = h->alg == A_MD5 ? bits >> (8 * i) : bits >> (56 - 8 * i);
+    hash_add(h, pad, padn + lenbytes);
+    {
+        size_t n = hash_size(h->alg);
+        for (i = 0; i < n; i++) {
+            if (h->alg == A_MD5) out[i] = h->s[i / 4] >> (8 * (i % 4));
+            else if (h->alg >= A_SHA384) out[i] = h->q[i / 8] >> (56 - 8 * (i % 8));
+            else out[i] = h->s[i / 4] >> (24 - 8 * (i % 4));
+        }
+    }
+}
+
+static void hex_of(const unsigned char *d, size_t n, char *out)
+{
+    size_t i;
+    for (i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", d[i]);
+}
+
+static int hash_fd(int fd, int alg, char *hex)
+{
+    struct hash h;
+    unsigned char buf[65536], d[64];
+    ssize_t n;
+    hash_init(&h, alg);
+    while ((n = read(fd, buf, sizeof buf)) > 0) hash_add(&h, buf, n);
+    if (n < 0) return -1;
+    hash_end(&h, d);
+    hex_of(d, hash_size(alg), hex);
+    return 0;
+}
+
+static const char *const alg_names[] = { "MD5", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512" };
+
+static int t_digest(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "binary", 0, 'b' }, { "text", 0, 't' }, { "check", 0, 'c' }, { "tag", 0, 'T' }, { "quiet", 0, 'q' },
+        { "status", 0, 's' }, { "warn", 0, 'w' }, { "strict", 0, 'S' }, { "ignore-missing", 0, 'I' }, { "zero", 0, 'z' }, { "untagged", 0, 'U' }, { NULL, 0, 0 } };
+    int alg = !strcmp(prog, "md5sum") ? A_MD5 : !strcmp(prog, "sha1sum") ? A_SHA1 : !strcmp(prog, "sha224sum") ? A_SHA224 :
+        !strcmp(prog, "sha256sum") ? A_SHA256 : !strcmp(prog, "sha384sum") ? A_SHA384 : A_SHA512;
+    int c, bin = 0, check = 0, tag = 0, quiet = 0, stat_only = 0, strict = 0, ignmiss = 0, zero = 0, bad = 0, i;
+    char hex[130];
+    opts_reset();
+    while ((c = getopts(argc, argv, "btczw", lo)))
+        switch (c) {
+        case 'b': bin = 1; break; case 't': bin = 0; break; case 'c': check = 1; break; case 'T': tag = 1; break;
+        case 'q': quiet = 1; break; case 's': stat_only = 1; break; case 'S': strict = 1; break; case 'I': ignmiss = 1; break;
+        case 'z': zero = 1; break; default: break;
+        }
+    if (!nops) ops[nops++] = "-";
+    if (!check) {
+        for (i = 0; i < nops; i++) {
+            int fd = open_input(ops[i]);
+            const char *name = ops[i];
+            int esc = 0;
+            if (fd < 0 || hash_fd(fd, alg, hex) < 0) { perr("%s", ops[i]); bad = 1; if (fd > 0) close(fd); continue; }
+            if (fd) close(fd);
+            if (!zero) {
+                const char *s;
+                for (s = name; *s; s++) if (*s == '\\' || *s == '\n') esc = 1;
+                if (esc) putchar('\\');
+            }
+            if (tag) {
+                printf("%s (", alg_names[alg]);
+                if (esc) { const char *s; for (s = name; *s; s++) fputs(*s == '\\' ? "\\\\" : *s == '\n' ? "\\n" : (char[]){ *s, 0 }, stdout); }
+                else fputs(name, stdout);
+                printf(") = %s", hex);
+            } else {
+                printf("%s %c", hex, bin ? '*' : ' ');
+                if (esc) { const char *s; for (s = name; *s; s++) fputs(*s == '\\' ? "\\\\" : *s == '\n' ? "\\n" : (char[]){ *s, 0 }, stdout); }
+                else fputs(name, stdout);
+            }
+            putchar(zero ? 0 : '\n');
+        }
+        return finish_stdout() ? 1 : bad;
+    }
+    {
+        long fail = 0, unread = 0, improper = 0;
+        for (i = 0; i < nops; i++) {
+            FILE *f = !strcmp(ops[i], "-") ? stdin : fopen(ops[i], "r");
+            char *line = NULL;
+            size_t cap = 0;
+            ssize_t n;
+            long found = 0;
+            if (!f) { perr("%s", ops[i]); bad = 1; continue; }
+            while ((n = getline(&line, &cap, f)) >= 0) {
+                char *p = line, *name, *want;
+                char got[130];
+                int fd, esc = 0, t = alg;
+                if (n && line[n - 1] == '\n') line[--n] = 0;
+                if (*p == '\\') { esc = 1; p++; }
+                if (!*p || *p == '#') continue;
+                {
+                    int a;
+                    for (a = 0; a < 6; a++) {
+                        size_t l = strlen(alg_names[a]);
+                        if (!strncmp(p, alg_names[a], l) && p[l] == ' ' && p[l + 1] == '(') { t = a; break; }
+                    }
+                    if (a < 6) {
+                        char *close_p = strstr(p, ") = ");
+                        if (!close_p) { improper++; continue; }
+                        name = p + strlen(alg_names[a]) + 2; *close_p = 0; want = close_p + 4;
+                        goto have;
+                    }
+                }
+                {
+                    size_t hl = strspn(p, "0123456789abcdefABCDEF");
+                    if (hl != hash_size(alg) * 2 || p[hl] != ' ' || (p[hl + 1] != ' ' && p[hl + 1] != '*')) { improper++; continue; }
+                    p[hl] = 0; want = p; name = p + hl + 2;
+                }
+have:
+                found++;
+                if (esc) {
+                    char *r = name, *w = name;
+                    while (*r) { if (*r == '\\' && r[1] == 'n') { *w++ = '\n'; r += 2; } else if (*r == '\\' && r[1] == '\\') { *w++ = '\\'; r += 2; } else *w++ = *r++; }
+                    *w = 0;
+                }
+                fd = open_input(name);
+                if (fd < 0) {
+                    if (ignmiss && errno == ENOENT) continue;
+                    fflush(stdout);
+                    fprintf(stderr, "%s: %s: %s\n", prog, name, strerror(errno));
+                    if (!stat_only) printf("%s: FAILED open or read\n", name);
+                    unread++; continue;
+                }
+                if (hash_fd(fd, t, got) < 0) { perr("%s", name); unread++; if (fd) close(fd); continue; }
+                if (fd) close(fd);
+                {
+                    size_t k;
+                    int same = strlen(want) == strlen(got);
+                    for (k = 0; same && got[k]; k++) if (tolower((unsigned char)want[k]) != got[k]) same = 0;
+                    if (same) { if (!quiet && !stat_only) printf("%s: OK\n", name); }
+                    else { fail++; if (!stat_only) printf("%s: FAILED\n", name); }
+                }
+            }
+            free(line);
+            if (f != stdin) fclose(f);
+            if (!found) { if (!stat_only) say("%s: no properly formatted checksum lines found", ops[i]); bad = 1; }
+        }
+        fflush(stdout);
+        if (!stat_only) {
+            if (improper) say("WARNING: %ld line%s improperly formatted", improper, improper == 1 ? " is" : "s are");
+            if (unread) say("WARNING: %ld listed file%s could not be read", unread, unread == 1 ? "" : "s");
+            if (fail) say("WARNING: %ld computed checksum%s did NOT match", fail, fail == 1 ? "" : "s");
+        }
+        return finish_stdout() ? 1 : (bad || fail || unread || (strict && improper)) ? 1 : 0;
+    }
+}
+
+static uint32_t crc_table[256];
+
+static void crc_init(void)
+{
+    int i, j;
+    for (i = 0; i < 256; i++) {
+        uint32_t c = (uint32_t)i << 24;
+        for (j = 0; j < 8; j++) c = c & 0x80000000 ? c << 1 ^ 0x04c11db7 : c << 1;
+        crc_table[i] = c;
+    }
+}
+
+static int t_cksum(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "algorithm", 1, 'a' }, { "tag", 0, 'T' }, { "untagged", 0, 'U' }, { "binary", 0, 'b' }, { "text", 0, 't' }, { NULL, 0, 0 } };
+    int c, bad = 0, i, mode = 0;
+    const char *al = "crc";
+    int issum = !strcmp(prog, "sum"), sysv = 0, implicit;
+    opts_reset();
+    while ((c = getopts(argc, argv, issum ? "rs" : "a:bt", lo)))
+        switch (c) {
+        case 'a': al = optarg; break; case 's': sysv = 1; break; default: break;
+        }
+    if (issum) al = sysv ? "sysv" : "bsd";
+    if (!strcmp(al, "crc")) mode = 0; else if (!strcmp(al, "sysv")) mode = 1; else if (!strcmp(al, "bsd")) mode = 2;
+    else {
+        int a;
+        for (a = 0; a < 6; a++) {
+            char low[16];
+            size_t k;
+            for (k = 0; alg_names[a][k]; k++) low[k] = tolower((unsigned char)alg_names[a][k]);
+            low[k] = 0;
+            if (!strcmp(al, low)) {
+                char **nv = xmalloc((argc + 2) * sizeof *nv);
+                int n = 0, j;
+                static const char *const progs[] = { "md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum" };
+                nv[n++] = (char *)progs[a]; nv[n++] = "--tag";
+                for (j = 0; j < nops; j++) nv[n++] = ops[j];
+                nv[n] = NULL;
+                prog = progs[a];
+                opts_reset();
+                return t_digest(n, nv);
+            }
+        }
+        die(1, "invalid argument '%s' for '--algorithm'", al);
+    }
+    crc_init();
+    implicit = !nops;
+    if (!nops) ops[nops++] = "-";
+    for (i = 0; i < nops; i++) {
+        int fd = open_input(ops[i]);
+        unsigned char buf[65536];
+        ssize_t n, k;
+        uint32_t crc = 0;
+        unsigned long long len = 0, sum = 0;
+        unsigned bsd = 0;
+        if (fd < 0) { perr("%s", ops[i]); bad = 1; continue; }
+        while ((n = read(fd, buf, sizeof buf)) > 0) {
+            len += n;
+            for (k = 0; k < n; k++) {
+                if (mode == 0) crc = crc << 8 ^ crc_table[(crc >> 24 ^ buf[k]) & 255];
+                else if (mode == 1) sum += buf[k];
+                else { bsd = (bsd >> 1) + ((bsd & 1) << 15); bsd = (bsd + buf[k]) & 0xffff; }
+            }
+        }
+        if (n < 0) { perr("%s", ops[i]); bad = 1; if (fd) close(fd); continue; }
+        if (fd) close(fd);
+        if (mode == 0) {
+            unsigned long long l = len;
+            for (; l; l >>= 8) crc = crc << 8 ^ crc_table[(crc >> 24 ^ (unsigned)(l & 255)) & 255];
+            crc = ~crc;
+            printf("%u %llu", crc, len);
+        } else if (mode == 1) {
+            unsigned r = (sum & 0xffff) + ((sum & 0xffffffff) >> 16);
+            r = (r & 0xffff) + (r >> 16);
+            printf("%u %llu", r, (len + (issum ? 511 : 511)) / 512);
+        } else printf("%05u %5llu", bsd, (len + 1023) / 1024);
+        if (!implicit && (!issum || nops > 1)) printf(" %s", ops[i]);
+        putchar('\n');
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- base64 base32 ---- */
+
+static int t_base(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "decode", 0, 'd' }, { "wrap", 1, 'w' }, { "ignore-garbage", 0, 'i' }, { NULL, 0, 0 } };
+    int b32 = !strcmp(prog, "base32"), c, dec = 0, ign = 0, bad = 0, col = 0;
+    unsigned long wrap = 76;
+    const char *alpha = b32 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int bits = b32 ? 5 : 6, grp = b32 ? 5 : 3, outc = b32 ? 8 : 4;
+    unsigned char *d;
+    size_t len, i;
+    int fd;
+    opts_reset();
+    while ((c = getopts(argc, argv, "diw:", lo)))
+        switch (c) {
+        case 'd': dec = 1; break; case 'i': ign = 1; break;
+        case 'w': if (!parse_ulong(optarg, &wrap)) die(1, "invalid wrap size: '%s'", optarg); break;
+        default: break;
+        }
+    if (nops > 1) extra_operand(ops[1]);
+    fd = open_input(nops ? ops[0] : "-");
+    if (fd < 0) { perr("%s", ops[0]); return 1; }
+    if (read_all(fd, (char **)&d, &len) < 0) { perr("read error"); return 1; }
+    if (!dec) {
+        for (i = 0; i < len; i += grp) {
+            unsigned long long v = 0;
+            size_t have = len - i < (size_t)grp ? len - i : (size_t)grp;
+            int k, nchars = (int)((have * 8 + bits - 1) / bits);
+            for (k = 0; k < grp; k++) v = v << 8 | (k < (int)have ? d[i + k] : 0);
+            for (k = 0; k < outc; k++) {
+                char ch = k < nchars ? alpha[(v >> ((outc - 1 - k) * bits)) & ((1 << bits) - 1)] : '=';
+                if (wrap && col == (int)wrap) { putchar('\n'); col = 0; }
+                putchar(ch); col++;
+            }
+        }
+        if (col && wrap) putchar('\n');
+    } else {
+        unsigned long long acc = 0;
+        int nb = 0, pad = 0;
+        for (i = 0; i < len; i++) {
+            const char *p;
+            if (d[i] == '\n') continue;
+            if (d[i] == '=') { pad++; continue; }
+            p = d[i] ? strchr(alpha, d[i]) : NULL;
+            if (!p || pad) { if (ign) continue; bad = 1; break; }
+            acc = acc << bits | (p - alpha);
+            if (++nb == outc) {
+                int k;
+                for (k = grp - 1; k >= 0; k--) putchar((acc >> (8 * k)) & 255);
+                acc = 0; nb = 0;
+            }
+        }
+        if (!bad && nb) {
+            int bytes = nb * bits / 8, k, full = outc - nb;
+            if (nb * bits % 8 >= bits || (!b32 && nb == 1)) bad = 1;
+            else {
+                acc <<= full * bits;
+                for (k = grp - 1; k >= grp - bytes; k--) putchar((acc >> (8 * k)) & 255);
+            }
+        }
+        if (bad) { fflush(stdout); say("invalid input"); return 1; }
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- dd ---- */
+
+static unsigned long long dd_num(const char *s)
+{
+    unsigned long long v = 0, m;
+    char *e;
+    const char *x;
+    if (!isdigit((unsigned char)*s)) die(1, "invalid number: '%s'", s);
+    v = strtoull(s, &e, 10);
+    for (;;) {
+        m = 1;
+        switch (*e) {
+        case 'c': m = 1; e++; break; case 'w': m = 2; e++; break; case 'b': m = 512; e++; break;
+        case 'k': case 'K': m = 1024; e++; if (*e == 'B') { m = 1000; e++; } break;
+        case 'M': m = 1 << 20; e++; if (*e == 'B') { m = 1000000; e++; } break;
+        case 'G': m = 1ULL << 30; e++; if (*e == 'B') { m = 1000000000; e++; } break;
+        case 'T': m = 1ULL << 40; e++; break;
+        default: break;
+        }
+        v *= m;
+        if (*e == 'x') { x = e + 1; if (!isdigit((unsigned char)*x)) die(1, "invalid number: '%s'", s); v *= strtoull(x, &e, 10); continue; }
+        break;
+    }
+    if (*e) die(1, "invalid number: '%s'", s);
+    return v;
+}
+
+static int t_dd(int argc, char **argv)
+{
+    const char *in = NULL, *out = NULL;
+    unsigned long long ibs = 512, obs = 512, count = ~0ULL, skip = 0, seek = 0, rin = 0, pin = 0, rout = 0, pout = 0, bytes = 0;
+    int notrunc = 0, sync_ = 0, noerror = 0, ucase = 0, lcase = 0, swab = 0, excl = 0, nocreat = 0, status = 1, i, fi = 0, fo = 1;
+    unsigned char *buf, *ob;
+    size_t on = 0;
+    int rc = 0;
+    if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--version")) { printf("dd (rifle) " VERSION "\n"); return 0; }
+    for (i = 1; i < argc; i++) {
+        char *a = argv[i], *v = strchr(a, '=');
+        if (!v) { say("unrecognized operand '%s'", a); usage_error(); }
+        *v++ = 0;
+        if (!strcmp(a, "if")) in = v; else if (!strcmp(a, "of")) out = v;
+        else if (!strcmp(a, "bs")) { ibs = obs = dd_num(v); }
+        else if (!strcmp(a, "ibs")) ibs = dd_num(v); else if (!strcmp(a, "obs")) obs = dd_num(v);
+        else if (!strcmp(a, "count")) count = dd_num(v); else if (!strcmp(a, "skip") || !strcmp(a, "iseek")) skip = dd_num(v);
+        else if (!strcmp(a, "seek") || !strcmp(a, "oseek")) seek = dd_num(v);
+        else if (!strcmp(a, "status")) status = !strcmp(v, "none") ? 0 : !strcmp(v, "noxfer") ? 2 : 1;
+        else if (!strcmp(a, "conv")) {
+            char *t = v, *e;
+            while (t) {
+                e = strchr(t, ','); if (e) *e++ = 0;
+                if (!strcmp(t, "notrunc")) notrunc = 1; else if (!strcmp(t, "sync")) sync_ = 1; else if (!strcmp(t, "noerror")) noerror = 1;
+                else if (!strcmp(t, "ucase")) ucase = 1; else if (!strcmp(t, "lcase")) lcase = 1; else if (!strcmp(t, "swab")) swab = 1;
+                else if (!strcmp(t, "excl")) excl = 1; else if (!strcmp(t, "nocreat")) nocreat = 1; else if (strcmp(t, "fsync") && strcmp(t, "fdatasync")) die(1, "invalid conversion: '%s'", t);
+                t = e;
+            }
+        } else if (strcmp(a, "iflag") && strcmp(a, "oflag")) { say("unrecognized operand '%s=%s'", a, v); usage_error(); }
+    }
+    if (!ibs || !obs) die(1, "invalid number: '0'");
+    if (in) { fi = open(in, O_RDONLY); if (fi < 0) { perr("failed to open '%s'", in); return 1; } }
+    if (out) {
+        int fl = O_WRONLY | (nocreat ? 0 : O_CREAT) | (excl ? O_EXCL : 0) | (notrunc || seek ? 0 : O_TRUNC);
+        fo = open(out, fl, 0666);
+        if (fo < 0) { perr("failed to open '%s'", out); return 1; }
+    }
+    buf = xmalloc(ibs); ob = xmalloc(obs + ibs);
+    if (skip) {
+        if (lseek(fi, skip * ibs, SEEK_CUR) < 0) {
+            unsigned long long k;
+            for (k = 0; k < skip; k++) { ssize_t r = read(fi, buf, ibs); if (r <= 0) break; }
+        }
+    }
+    if (seek) {
+        if (lseek(fo, seek * obs, SEEK_SET) < 0) perr("cannot seek '%s'", out ? out : "standard output");
+    }
+    while (count == ~0ULL || rin + pin < count) {
+        ssize_t n = read(fi, buf, ibs);
+        size_t k;
+        if (n < 0) {
+            perr("error reading '%s'", in ? in : "standard input");
+            rc = 1;
+            if (!noerror) break;
+            if (status) { fprintf(stderr, "%llu+%llu records in\n%llu+%llu records out\n", rin, pin, rout, pout); }
+            n = 0;
+            if (sync_) n = 0;
+            if (!sync_) continue;
+        }
+        if (n == 0 && !(sync_ && rc)) break;
+        if ((unsigned long long)n < ibs) {
+            pin++;
+            if (sync_) { memset(buf + n, ucase || lcase ? ' ' : 0, ibs - n); n = ibs; }
+        } else rin++;
+        if (swab) for (k = 0; k + 1 < (size_t)n; k += 2) { unsigned char t = buf[k]; buf[k] = buf[k + 1]; buf[k + 1] = t; }
+        if (ucase) for (k = 0; k < (size_t)n; k++) buf[k] = toupper(buf[k]);
+        if (lcase) for (k = 0; k < (size_t)n; k++) buf[k] = tolower(buf[k]);
+        memcpy(ob + on, buf, n); on += n;
+        while (on >= obs) {
+            if (write_all(fo, (char *)ob, obs) < 0) { perr("error writing '%s'", out ? out : "standard output"); return 1; }
+            bytes += obs; rout++;
+            memmove(ob, ob + obs, on - obs); on -= obs;
+        }
+    }
+    if (on) {
+        if (write_all(fo, (char *)ob, on) < 0) { perr("error writing '%s'", out ? out : "standard output"); return 1; }
+        bytes += on; pout++;
+    }
+    if (out && !notrunc && seek) ftruncate(fo, seek * obs + bytes);
+    if (status) {
+        fprintf(stderr, "%llu+%llu records in\n%llu+%llu records out\n", rin, pin, rout, pout);
+        if (status == 1) fprintf(stderr, "%llu bytes copied\n", bytes);
+    }
+    if (out && close(fo) < 0) { perr("closing output file"); return 1; }
+    return rc;
+}
+
+/* ---- od ---- */
+
+struct odfmt { char kind; int size; int width; };
+
+static const char *const od_names[] = { "nul", "soh", "stx", "etx", "eot", "enq", "ack", "bel", "bs", "ht", "nl", "vt", "ff", "cr", "so", "si",
+    "dle", "dc1", "dc2", "dc3", "dc4", "nak", "syn", "etb", "can", "em", "sub", "esc", "fs", "gs", "rs", "us", "sp" };
+
+static int od_spec(const char *s, struct odfmt *f, int max)
+{
+    int n = 0;
+    while (*s) {
+        char k = *s++;
+        int size = 0;
+        if (n == max) die(1, "too many -t formats");
+        if (k == 'a' || k == 'c') { f[n].kind = k; f[n].size = 1; f[n].width = 3; n++; continue; }
+        if (!strchr("doux", k) && k != 'f') die(1, "invalid type string '%c'", k);
+        if (isdigit((unsigned char)*s)) { size = strtol(s, (char **)&s, 10); }
+        else if (*s == 'C') { size = 1; s++; } else if (*s == 'S') { size = 2; s++; } else if (*s == 'I') { size = 4; s++; } else if (*s == 'L') { size = 8; s++; }
+        else if (*s == 'F' || *s == 'D') { size = *s == 'F' ? 4 : 8; s++; }
+        else size = k == 'f' ? 8 : 4;
+        if (k == 'f') { if (size != 4 && size != 8) die(1, "invalid type string 'f%d'", size); }
+        else if (size != 1 && size != 2 && size != 4 && size != 8) die(1, "invalid type string '%c%d'", k, size);
+        f[n].kind = k; f[n].size = size;
+        if (k == 'f') f[n].width = size == 4 ? 15 : 24;
+        else if (k == 'o') f[n].width = size == 1 ? 3 : size == 2 ? 6 : size == 4 ? 11 : 22;
+        else if (k == 'x') f[n].width = size * 2;
+        else if (k == 'u') f[n].width = size == 1 ? 3 : size == 2 ? 5 : size == 4 ? 10 : 20;
+        else f[n].width = size == 1 ? 4 : size == 2 ? 6 : size == 4 ? 11 : 20;
+        n++;
+    }
+    return n;
+}
+
+static void od_field(const struct odfmt *f, const unsigned char *p, size_t avail)
+{
+    unsigned long long v = 0;
+    int i;
+    unsigned char tmp[8] = { 0 };
+    memcpy(tmp, p, avail < (size_t)f->size ? avail : (size_t)f->size);
+    for (i = f->size - 1; i >= 0; i--) v = v << 8 | tmp[i];
+    switch (f->kind) {
+    case 'a': { int c = tmp[0] & 127; printf(" %*s", 3, c < 33 ? od_names[c] : c == 127 ? "del" : (char[]){ c, 0 }); break; }
+    case 'c': {
+        int c = tmp[0];
+        char b[8];
+        switch (c) {
+        case 0: strcpy(b, "\\0"); break; case 7: strcpy(b, "\\a"); break; case 8: strcpy(b, "\\b"); break; case 12: strcpy(b, "\\f"); break;
+        case 10: strcpy(b, "\\n"); break; case 13: strcpy(b, "\\r"); break; case 9: strcpy(b, "\\t"); break; case 11: strcpy(b, "\\v"); break;
+        default: if (c >= 32 && c < 127) { b[0] = c; b[1] = 0; } else sprintf(b, "%03o", c);
+        }
+        printf(" %*s", 3, b);
+        break;
+    }
+    case 'o': printf(" %0*llo", f->width, v); break;
+    case 'x': printf(" %0*llx", f->width, v); break;
+    case 'u': printf(" %*llu", f->width, v); break;
+    case 'd': {
+        long long sv = f->size == 1 ? (signed char)v : f->size == 2 ? (short)v : f->size == 4 ? (int)v : (long long)v;
+        printf(" %*lld", f->width, sv);
+        break;
+    }
+    case 'f': {
+        if (f->size == 4) { float x; memcpy(&x, tmp, 4); printf(" %*.8g", f->width, (double)x); }
+        else { double x; memcpy(&x, tmp, 8); printf(" %*.17g", f->width, x); }
+        break;
+    }
+    }
+}
+
+static int t_od(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "address-radix", 1, 'A' }, { "format", 1, 't' }, { "read-bytes", 1, 'N' }, { "skip-bytes", 1, 'j' },
+        { "output-duplicates", 0, 'v' }, { "width", 2, 'w' }, { NULL, 0, 0 } };
+    struct odfmt fm[16];
+    int nf = 0, c, radix = 'o', dups = 0, i, fd, bad = 0;
+    unsigned long width = 16, limit = ~0UL, skip = 0;
+    unsigned char *data, *prev = NULL;
+    size_t len = 0, pos;
+    int starred = 0, aw;
+    opts_reset();
+    while ((c = getopts(argc, argv, "A:t:N:j:vw::abcdfhilosxCDFIL", lo)))
+        switch (c) {
+        case 'A': if (!strchr("doxn", optarg[0]) || optarg[1]) die(1, "invalid output address radix '%s'; it must be one character from [doxn]", optarg); radix = optarg[0]; break;
+        case 't': nf += od_spec(optarg, fm + nf, 16 - nf); break;
+        case 'N': if (!parse_ulong(optarg, &limit)) die(1, "invalid -N argument '%s'", optarg); break;
+        case 'j': if (!parse_ulong(optarg, &skip)) die(1, "invalid -j argument '%s'", optarg); break;
+        case 'v': dups = 1; break;
+        case 'w': width = optarg ? strtoul(optarg, NULL, 10) : 32; if (!width) width = 16; break;
+        case 'a': nf += od_spec("a", fm + nf, 16 - nf); break;
+        case 'b': nf += od_spec("o1", fm + nf, 16 - nf); break;
+        case 'c': nf += od_spec("c", fm + nf, 16 - nf); break;
+        case 'd': nf += od_spec("u2", fm + nf, 16 - nf); break;
+        case 'f': nf += od_spec("f4", fm + nf, 16 - nf); break;
+        case 'h': case 'x': nf += od_spec("x2", fm + nf, 16 - nf); break;
+        case 'i': nf += od_spec("d2", fm + nf, 16 - nf); break;
+        case 'l': nf += od_spec("d8", fm + nf, 16 - nf); break;
+        case 'o': nf += od_spec("o2", fm + nf, 16 - nf); break;
+        case 's': nf += od_spec("d2", fm + nf, 16 - nf); break;
+        default: break;
+        }
+    if (!nf) nf = od_spec("o2", fm, 16);
+    {
+        size_t cap = 0, got = 0;
+        char *all = NULL;
+        int k;
+        if (!nops) ops[nops++] = "-";
+        for (k = 0; k < nops; k++) {
+            char *d;
+            size_t l;
+            fd = open_input(ops[k]);
+            if (fd < 0) { perr("%s", ops[k]); bad = 1; continue; }
+            if (read_all(fd, &d, &l) < 0) { perr("%s", ops[k]); bad = 1; continue; }
+            if (fd) close(fd);
+            if (got + l > cap) { cap = got + l; all = xrealloc(all, cap + 1); }
+            memcpy(all + got, d, l); got += l; free(d);
+        }
+        data = (unsigned char *)all; len = got;
+    }
+    if (skip) { if (skip > len) skip = len; data += skip; len -= skip; }
+    if (limit < len) len = limit;
+    aw = radix == 'd' ? 7 : radix == 'x' ? 6 : 7;
+    {
+        int maxs = 1;
+        for (i = 0; i < nf; i++) if (fm[i].size > maxs) maxs = fm[i].size;
+        if (width % maxs) width = (width / maxs + 1) * maxs;
+    }
+    for (pos = 0; pos < len; pos += width) {
+        size_t n = len - pos < width ? len - pos : width;
+        int first = 1;
+        if (!dups && prev && n == width && !memcmp(prev, data + pos, width)) {
+            if (!starred) { puts("*"); starred = 1; }
+            continue;
+        }
+        starred = 0;
+        prev = data + pos;
+        for (i = 0; i < nf; i++) {
+            size_t k;
+            if (first && radix != 'n') {
+                if (radix == 'd') printf("%0*lu", aw, (unsigned long)(pos + skip));
+                else if (radix == 'x') printf("%0*lx", aw, (unsigned long)(pos + skip));
+                else printf("%0*lo", aw, (unsigned long)(pos + skip));
+            } else if (radix != 'n') printf("%*s", aw, "");
+            first = 0;
+            for (k = 0; k < n; k += fm[i].size) od_field(&fm[i], data + pos + k, n - k);
+            putchar('\n');
+        }
+    }
+    if (radix != 'n') {
+        unsigned long end = len + skip;
+        if (radix == 'd') printf("%0*lu\n", aw, end); else if (radix == 'x') printf("%0*lx\n", aw, end); else printf("%0*lo\n", aw, end);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+/* ---- ls ---- */
+
+struct ent { char *name, *path, *link; struct stat st; int ok, linkok; struct stat lst; };
+
+static struct {
+    int all, almost, list, one, cols, across, comma, classify, slash, dir, inode, blocks, human, si, sortsz, sortt, sortu, sortc, rev, rec;
+    int deref, derefcmd, numeric, noown, nogrp, unsorted, ver, ext, quote, escape, dirfirst, kib, full, nolist;
+    int timestyle_iso, timestyle_long;
+    unsigned width;
+    const char *ignore[16]; int nignore;
+    const char *hide[16]; int nhide;
+} L;
+
+static int ls_cmp(const void *a, const void *b)
+{
+    const struct ent *x = a, *y = b;
+    int r = 0;
+    if (L.dirfirst) {
+        int dx = x->ok && S_ISDIR(x->st.st_mode), dy = y->ok && S_ISDIR(y->st.st_mode);
+        if (dx != dy) return dx ? -1 : 1;
+    }
+    if (L.sortsz) r = y->st.st_size < x->st.st_size ? -1 : y->st.st_size > x->st.st_size;
+    else if (L.sortt || L.sortu || L.sortc) {
+        long sx, nx, sy, ny;
+        if (L.sortu) { sx = x->st.st_atime; nx = x->st.st_atime_nsec; sy = y->st.st_atime; ny = y->st.st_atime_nsec; }
+        else if (L.sortc) { sx = x->st.st_ctime; nx = x->st.st_ctime_nsec; sy = y->st.st_ctime; ny = y->st.st_ctime_nsec; }
+        else { sx = x->st.st_mtime; nx = x->st.st_mtime_nsec; sy = y->st.st_mtime; ny = y->st.st_mtime_nsec; }
+        r = sy < sx ? -1 : sy > sx ? 1 : ny < nx ? -1 : ny > nx;
+    } else if (L.ver) r = vercmp(x->name, strlen(x->name), y->name, strlen(y->name));
+    else if (L.ext) {
+        const char *ex = strrchr(x->name, '.'), *ey = strrchr(y->name, '.');
+        r = strcmp(ex ? ex : "", ey ? ey : "");
+    }
+    if (!r) r = strcmp(x->name, y->name);
+    return L.rev ? -r : r;
+}
+
+static const char *ls_human(unsigned long long n, char *buf)
+{
+    static const char suf[] = " KMGTPE", sufsi[] = " kMGTPE";
+    unsigned long long base = L.si ? 1000 : 1024, v = n;
+    int i = 0;
+    if (n < base) { sprintf(buf, "%llu", n); return buf; }
+    while (v >= base && i < 6) { v /= base; i++; if (v < base) break; }
+    {
+        double d = (double)n;
+        int k;
+        for (k = 0; k < i; k++) d /= base;
+        if (d < 10) { unsigned t = (unsigned)(d * 10 + 0.9999999); sprintf(buf, "%u.%u%c", t / 10, t % 10, (L.si ? sufsi : suf)[i]); if (t >= 100) sprintf(buf, "%u%c", t / 10, (L.si ? sufsi : suf)[i]); }
+        else sprintf(buf, "%llu%c", (unsigned long long)(d + 0.9999999), (L.si ? sufsi : suf)[i]);
+    }
+    return buf;
+}
+
+static char ls_type(mode_t m)
+{
+    if (S_ISDIR(m)) return 'd'; if (S_ISLNK(m)) return 'l'; if (S_ISCHR(m)) return 'c'; if (S_ISBLK(m)) return 'b';
+    if (S_ISFIFO(m)) return 'p'; if (S_ISSOCK(m)) return 's';
+    return '-';
+}
+
+static char ls_mark(const struct ent *e)
+{
+    mode_t m = e->st.st_mode;
+    if (S_ISDIR(m)) return L.classify || L.slash ? '/' : 0;
+    if (!L.classify) return 0;
+    if (S_ISLNK(m)) return '@'; if (S_ISFIFO(m)) return '|'; if (S_ISSOCK(m)) return '='; if (m & 0111) return '*';
+    return 0;
+}
+
+static void ls_putname(const char *n)
+{
+    const char *p;
+    if (L.quote) {
+        putchar('"');
+        for (p = n; *p; p++) { if (*p == '"' || *p == '\\') putchar('\\'); putchar(*p); }
+        putchar('"');
+    } else if (L.escape) {
+        for (p = n; *p; p++) {
+            unsigned char c = *p;
+            if (c == ' ') fputs("\\ ", stdout); else if (c == '\\') fputs("\\\\", stdout); else if (c == '\n') fputs("\\n", stdout);
+            else if (c == '\t') fputs("\\t", stdout); else if (c < 32 || c == 127) printf("\\%03o", c); else putchar(c);
+        }
+    } else fputs(n, stdout);
+}
+
+static size_t ls_namelen(const struct ent *e)
+{
+    size_t n = strlen(e->name);
+    if (L.quote) n += 2;
+    if (ls_mark(e)) n++;
+    return n;
+}
+
+static void ls_time(const struct stat *st, char *out)
+{
+    time_t t = L.sortu ? st->st_atime : L.sortc ? st->st_ctime : st->st_mtime;
+    long ns = L.sortu ? st->st_atime_nsec : L.sortc ? st->st_ctime_nsec : st->st_mtime_nsec;
+    struct tm tm;
+    time_t now = time(NULL);
+    struct tm *g = gmtime(&t);
+    tm = *g;
+    if (L.full) strftime(out, 64, "%Y-%m-%d %H:%M:%S", &tm), sprintf(out + strlen(out), ".%09ld +0000", ns);
+    else if (L.timestyle_long) strftime(out, 64, "%Y-%m-%d %H:%M", &tm);
+    else if (L.timestyle_iso) strftime(out, 64, (t > now - 15778476 && t < now + 3600) ? "%m-%d %H:%M" : "%Y-%m-%d ", &tm);
+    else if (t > now - 15778476 && t < now + 3600) strftime(out, 64, "%b %e %H:%M", &tm);
+    else strftime(out, 64, "%b %e  %Y", &tm);
+}
+
+static void ls_mode(mode_t m, char *s)
+{
+    mode_string(m, s + 1);
+    s[0] = ls_type(m);
+}
+
+static long long ls_blocks(const struct ent *e) { return e->st.st_blocks; }
+
+static void ls_show(struct ent *v, int n, int dirtotal)
+{
+    int i;
+    if (L.list) {
+        size_t wl = 1, wu = 1, wg = 1, ws = 1, wi = 1, wb = 1;
+        char **us = xmalloc((n + 1) * sizeof *us), **gs = xmalloc((n + 1) * sizeof *gs), **sz = xmalloc((n + 1) * sizeof *sz);
+        long long total = 0;
+        char buf[64];
+        for (i = 0; i < n; i++) {
+            struct ent *e = &v[i];
+            size_t l;
+            us[i] = gs[i] = sz[i] = NULL;
+            if (!e->ok) continue;
+            total += ls_blocks(e);
+            l = snprintf(buf, sizeof buf, "%lu", (unsigned long)e->st.st_nlink); if (l > wl) wl = l;
+            us[i] = xstrdup(L.numeric ? (snprintf(buf, sizeof buf, "%u", e->st.st_uid), buf) : user_name(e->st.st_uid));
+            gs[i] = xstrdup(L.numeric ? (snprintf(buf, sizeof buf, "%u", e->st.st_gid), buf) : group_name(e->st.st_gid));
+            if (strlen(us[i]) > wu) wu = strlen(us[i]);
+            if (strlen(gs[i]) > wg) wg = strlen(gs[i]);
+            if (S_ISCHR(e->st.st_mode) || S_ISBLK(e->st.st_mode)) {
+                unsigned long d = e->st.st_rdev;
+                snprintf(buf, sizeof buf, "%lu, %lu", (d >> 8) & 0xfff, (d & 0xff) | ((d >> 12) & 0xfff00));
+            } else if (L.human) ls_human(e->st.st_size, buf);
+            else snprintf(buf, sizeof buf, "%lld", (long long)e->st.st_size);
+            sz[i] = xstrdup(buf);
+            if (strlen(buf) > ws) ws = strlen(buf);
+            l = snprintf(buf, sizeof buf, "%lu", (unsigned long)e->st.st_ino); if (l > wi) wi = l;
+            if (L.human) ls_human(ls_blocks(e) * 512, buf); else snprintf(buf, sizeof buf, "%lld", (ls_blocks(e) * 512 + (L.kib || 1 ? 1023 : 0)) / 1024);
+            l = strlen(buf); if (l > wb) wb = l;
+        }
+        if (dirtotal) {
+            if (L.human) { ls_human(total * 512, buf); printf("total %s\n", buf); }
+            else printf("total %lld\n", (total * 512 + 1023) / 1024);
+        }
+        for (i = 0; i < n; i++) {
+            struct ent *e = &v[i];
+            char mode[16], tm[64];
+            char mk;
+            if (!e->ok) { printf("? ?????????? ? ? ? ? ? %s\n", e->name); continue; }
+            if (L.inode) printf("%*lu ", (int)wi, (unsigned long)e->st.st_ino);
+            if (L.blocks) {
+                if (L.human) ls_human(ls_blocks(e) * 512, buf); else snprintf(buf, sizeof buf, "%lld", (ls_blocks(e) * 512 + 1023) / 1024);
+                printf("%*s ", (int)wb, buf);
+            }
+            ls_mode(e->st.st_mode, mode);
+            ls_time(&e->st, tm);
+            printf("%s %*lu", mode, (int)wl, (unsigned long)e->st.st_nlink);
+            if (!L.noown) printf(" %-*s", (int)wu, us[i]);
+            if (!L.nogrp) printf(" %-*s", (int)wg, gs[i]);
+            printf(" %*s %s ", (int)ws, sz[i], tm);
+            ls_putname(e->name);
+            mk = ls_mark(e);
+            if (mk && !S_ISLNK(e->st.st_mode)) putchar(mk);
+            if (S_ISLNK(e->st.st_mode) && e->link) { fputs(" -> ", stdout); fputs(e->link, stdout); if (L.classify && e->linkok) { struct ent t = *e; t.st = e->lst; if (ls_mark(&t)) putchar(ls_mark(&t)); } }
+            putchar('\n');
+            free(us[i]); free(gs[i]); free(sz[i]);
+        }
+        free(us); free(gs); free(sz);
+        return;
+    }
+    if (dirtotal && L.blocks) {
+        long long total = 0;
+        for (i = 0; i < n; i++) if (v[i].ok) total += ls_blocks(&v[i]);
+        printf("total %lld\n", (total * 512 + 1023) / 1024);
+    }
+    if (L.comma) {
+        size_t col = 0;
+        for (i = 0; i < n; i++) {
+            size_t l = ls_namelen(&v[i]) + 2;
+            if (i && col + l + 0 > L.width) { putchar('\n'); col = 0; }
+            if (i && col) putchar(' ');
+            ls_putname(v[i].name);
+            if (ls_mark(&v[i])) putchar(ls_mark(&v[i]));
+            col += l;
+            if (i + 1 < n) putchar(',');
+        }
+        if (n) putchar('\n');
+        return;
+    }
+    if (L.cols || L.across) {
+        size_t maxw = 0, ncols, nrows, r, c;
+        for (i = 0; i < n; i++) {
+            size_t l = ls_namelen(&v[i]) + (L.inode ? 8 : 0) + (L.blocks ? 5 : 0);
+            if (l > maxw) maxw = l;
+        }
+        ncols = L.width / (maxw + 2);
+        if (!ncols) ncols = 1;
+        {
+            size_t best = 1;
+            size_t cand;
+            for (cand = ncols < (size_t)n ? ncols : (size_t)n; cand >= 1; cand--) {
+                size_t rows = (n + cand - 1) / cand, tot = 0, k, j;
+                size_t *w = xmalloc(cand * sizeof *w);
+                for (j = 0; j < cand; j++) w[j] = 0;
+                for (k = 0; k < (size_t)n; k++) {
+                    size_t cc = L.across ? k % cand : k / rows;
+                    size_t l = ls_namelen(&v[k]) + (L.inode ? 8 : 0) + (L.blocks ? 5 : 0);
+                    if (l > w[cc]) w[cc] = l;
+                }
+                for (j = 0; j < cand; j++) tot += w[j] + (j + 1 < cand ? 2 : 0);
+                free(w);
+                if (tot <= L.width || cand == 1) { best = cand; break; }
+            }
+            ncols = best;
+        }
+        nrows = (n + ncols - 1) / ncols;
+        {
+            size_t *w = xmalloc(ncols * sizeof *w);
+            for (c = 0; c < ncols; c++) w[c] = 0;
+            for (i = 0; i < n; i++) {
+                size_t cc = L.across ? (size_t)i % ncols : (size_t)i / nrows, l = ls_namelen(&v[i]) + (L.inode ? 8 : 0) + (L.blocks ? 5 : 0);
+                if (l > w[cc]) w[cc] = l;
+            }
+            for (r = 0; r < nrows; r++) {
+                for (c = 0; c < ncols; c++) {
+                    size_t idx = L.across ? r * ncols + c : c * nrows + r, used;
+                    char mk;
+                    if (idx >= (size_t)n) break;
+                    if (L.inode) printf("%7lu ", (unsigned long)v[idx].st.st_ino);
+                    if (L.blocks) printf("%4lld ", (ls_blocks(&v[idx]) * 512 + 1023) / 1024);
+                    ls_putname(v[idx].name);
+                    mk = ls_mark(&v[idx]);
+                    if (mk) putchar(mk);
+                    used = ls_namelen(&v[idx]) + (L.inode ? 8 : 0) + (L.blocks ? 5 : 0);
+                    if (c + 1 < ncols && (L.across ? idx + 1 : idx + nrows) < (size_t)n) printf("%*s", (int)(w[c] - used + 2), "");
+                }
+                putchar('\n');
+            }
+            free(w);
+        }
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        char mk;
+        if (L.inode) printf("%lu ", (unsigned long)v[i].st.st_ino);
+        if (L.blocks) {
+            char buf[32];
+            if (L.human) ls_human(ls_blocks(&v[i]) * 512, buf); else snprintf(buf, sizeof buf, "%lld", (ls_blocks(&v[i]) * 512 + 1023) / 1024);
+            printf("%s ", buf);
+        }
+        ls_putname(v[i].name);
+        mk = ls_mark(&v[i]);
+        if (mk) putchar(mk);
+        putchar('\n');
+    }
+}
+
+static int ls_ignored(const char *name)
+{
+    int i;
+    for (i = 0; i < L.nignore; i++) if (glob_match(L.ignore[i], name)) return 1;
+    return 0;
+}
+
+static void ls_stat(struct ent *e, int top)
+{
+    int follow = L.deref || (top && L.derefcmd);
+    e->ok = (follow ? stat(e->path, &e->st) : lstat(e->path, &e->st)) == 0;
+    if (!e->ok && follow) e->ok = lstat(e->path, &e->st) == 0;
+    e->link = NULL; e->linkok = 0;
+    if (e->ok && S_ISLNK(e->st.st_mode)) {
+        char buf[PATH_MAX];
+        ssize_t n = readlink(e->path, buf, sizeof buf - 1);
+        if (n >= 0) { buf[n] = 0; e->link = xstrdup(buf); }
+        if (L.list && L.classify) e->linkok = stat(e->path, &e->lst) == 0;
+    }
+}
+
+static int ls_dir(const char *path, int header, int *first);
+
+static int ls_dir(const char *path, int header, int *first)
+{
+    DIR *d = opendir(path);
+    struct dirent *de;
+    struct ent *v = NULL;
+    int n = 0, cap = 0, i, bad = 0;
+    if (!d) { perr("cannot open directory '%s'", path); return 1; }
+    while ((de = readdir(d))) {
+        struct ent *e;
+        const char *nm = de->d_name;
+        if (!L.all && !L.almost && nm[0] == '.') continue;
+        if (L.almost && (!strcmp(nm, ".") || !strcmp(nm, ".."))) continue;
+        if (!L.all && ls_ignored(nm)) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 64; v = xrealloc(v, cap * sizeof *v); }
+        e = &v[n++];
+        e->name = xstrdup(nm);
+        e->path = xmalloc(strlen(path) + strlen(nm) + 2);
+        sprintf(e->path, "%s%s%s", path, path[strlen(path) - 1] == '/' ? "" : "/", nm);
+        ls_stat(e, 0);
+        if (!e->ok) { perr("cannot access '%s'", e->path); bad = 1; }
+    }
+    closedir(d);
+    if (!L.unsorted) qsort(v, n, sizeof *v, ls_cmp);
+    if (header) { if (!*first) putchar('\n'); printf("%s:\n", path); }
+    *first = 0;
+    if (L.list || (L.blocks && 1)) ls_show(v, n, 1); else ls_show(v, n, 0);
+    if (L.rec)
+        for (i = 0; i < n; i++)
+            if (v[i].ok && S_ISDIR(v[i].st.st_mode) && !(S_ISLNK(v[i].st.st_mode)) && strcmp(v[i].name, ".") && strcmp(v[i].name, ".."))
+                bad |= ls_dir(v[i].path, 1, first);
+    for (i = 0; i < n; i++) { free(v[i].name); free(v[i].path); free(v[i].link); }
+    free(v);
+    return bad;
+}
+
+static int t_ls(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "all", 0, 'a' }, { "almost-all", 0, 'A' }, { "classify", 2, 'F' }, { "directory", 0, 'd' }, { "inode", 0, 'i' },
+        { "size", 0, 's' }, { "human-readable", 0, 'h' }, { "si", 0, 'H' + 256 }, { "reverse", 0, 'r' }, { "recursive", 0, 'R' }, { "dereference", 0, 'L' },
+        { "dereference-command-line", 0, 'H' }, { "numeric-uid-gid", 0, 'n' }, { "no-group", 0, 'G' }, { "color", 2, 'C' + 256 }, { "full-time", 0, 'T' + 256 },
+        { "group-directories-first", 0, 'g' + 256 }, { "sort", 1, 'o' + 256 }, { "time", 1, 't' + 256 }, { "ignore", 1, 'I' }, { "hide", 1, 'h' + 256 },
+        { "quote-name", 0, 'Q' }, { "escape", 0, 'b' }, { "hide-control-chars", 0, 'q' }, { "width", 1, 'w' }, { "format", 1, 'f' + 256 },
+        { "indicator-style", 1, 'i' + 256 }, { "time-style", 1, 'y' + 256 }, { "kibibytes", 0, 'k' }, { "file-type", 0, 'F' + 512 }, { NULL, 0, 0 } };
+    int c, i, first = 1, bad = 0, nfiles = 0, ndirs = 0, tty = isatty(1);
+    struct ent *files = NULL, *dirs = NULL;
+    memset(&L, 0, sizeof L);
+    L.width = 80;
+    {
+        const char *w = getenv("COLUMNS");
+        if (w && atoi(w) > 0) L.width = atoi(w);
+    }
+    L.one = !tty;
+    L.cols = tty;
+    opts_reset();
+    while ((c = getopts(argc, argv, "aAlCx1FpdisShrRLHnogGtuUcvXkmqQbfw:I:T:", lo)))
+        switch (c) {
+        case 'a': L.all = 1; break; case 'A': L.almost = 1; break;
+        case 'l': L.list = 1; L.cols = L.across = L.comma = 0; break;
+        case 'o': L.list = 1; L.nogrp = 1; L.cols = 0; break;
+        case 'g': L.list = 1; L.noown = 1; L.cols = 0; break;
+        case 'n': L.list = 1; L.numeric = 1; L.cols = 0; break;
+        case '1': L.one = 1; L.cols = L.across = L.comma = L.list = 0; break;
+        case 'C': L.cols = 1; L.across = L.comma = L.list = 0; break;
+        case 'x': L.across = 1; L.cols = 0; L.comma = 0; L.list = 0; break;
+        case 'm': L.comma = 1; L.cols = L.across = L.list = 0; break;
+        case 'F': L.classify = 1; break; case 'p': L.slash = 1; break; case 'd': L.dir = 1; break;
+        case 'i': L.inode = 1; break; case 's': L.blocks = 1; break; case 'S': L.sortsz = 1; break;
+        case 'h': L.human = 1; break; case 'H': L.derefcmd = 1; break; case 'H' + 256: L.human = L.si = 1; break;
+        case 'r': L.rev = 1; break; case 'R': L.rec = 1; break; case 'L': L.deref = 1; break;
+        case 'G': L.nogrp = 1; break; case 't': L.sortt = 1; break; case 'u': L.sortu = 1; break; case 'c': L.sortc = 1; break;
+        case 'U': L.unsorted = 1; break; case 'v': L.ver = 1; break; case 'X': L.ext = 1; break;
+        case 'k': L.kib = 1; break; case 'q': break; case 'Q': L.quote = 1; break; case 'b': L.escape = 1; break;
+        case 'f': L.all = 1; L.unsorted = 1; L.list = 0; break;
+        case 'w': L.width = strtoul(optarg, NULL, 10); break;
+        case 'I': if (L.nignore < 16) L.ignore[L.nignore++] = optarg; break;
+        case 'C' + 256: break;
+        case 'T' + 256: L.full = 1; L.list = 1; L.cols = 0; break;
+        case 'g' + 256: L.dirfirst = 1; break;
+        case 'h' + 256: if (L.nignore < 16) L.ignore[L.nignore++] = optarg; break;
+        case 'o' + 256:
+            if (!strcmp(optarg, "size")) L.sortsz = 1; else if (!strcmp(optarg, "time")) L.sortt = 1; else if (!strcmp(optarg, "none")) L.unsorted = 1;
+            else if (!strcmp(optarg, "version")) L.ver = 1; else if (!strcmp(optarg, "extension")) L.ext = 1; else if (strcmp(optarg, "name")) die(2, "invalid argument '%s' for '--sort'", optarg);
+            break;
+        case 't' + 256: if (!strcmp(optarg, "atime") || !strcmp(optarg, "access")) L.sortu = 1; else if (!strcmp(optarg, "ctime") || !strcmp(optarg, "status")) L.sortc = 1; break;
+        case 'y' + 256: L.timestyle_iso = !strcmp(optarg, "iso"); L.timestyle_long = !strcmp(optarg, "long-iso"); if (!strcmp(optarg, "full-iso")) L.full = 1; break;
+        case 'f' + 256:
+            if (!strcmp(optarg, "long") || !strcmp(optarg, "verbose")) { L.list = 1; L.cols = 0; }
+            else if (!strcmp(optarg, "commas")) { L.comma = 1; L.cols = 0; } else if (!strcmp(optarg, "across") || !strcmp(optarg, "horizontal")) { L.across = 1; L.cols = 0; }
+            else if (!strcmp(optarg, "single-column")) { L.one = 1; L.cols = 0; } else if (!strcmp(optarg, "vertical")) L.cols = 1;
+            break;
+        case 'i' + 256: if (!strcmp(optarg, "slash")) L.slash = 1; else if (!strcmp(optarg, "classify")) L.classify = 1; break;
+        case 'F' + 512: L.classify = 1; break;
+        default: break;
+        }
+    if (L.list) L.one = 0;
+    if (!nops) ops[nops++] = ".";
+    for (i = 0; i < nops; i++) {
+        struct ent e;
+        e.name = ops[i]; e.path = ops[i];
+        ls_stat(&e, 1);
+        if (!e.ok) { perr("cannot access '%s'", ops[i]); bad = 2; continue; }
+        if (S_ISDIR(e.st.st_mode) && !L.dir) { dirs = xrealloc(dirs, (ndirs + 1) * sizeof *dirs); dirs[ndirs++] = e; }
+        else { files = xrealloc(files, (nfiles + 1) * sizeof *files); files[nfiles++] = e; }
+    }
+    if (!L.unsorted) { qsort(files, nfiles, sizeof *files, ls_cmp); qsort(dirs, ndirs, sizeof *dirs, ls_cmp); }
+    if (nfiles) { ls_show(files, nfiles, 0); first = 0; }
+    for (i = 0; i < ndirs; i++) {
+        int r = ls_dir(dirs[i].path, nops > 1 || L.rec, &first);
+        if (r && !bad) bad = 1;
+        if (r && bad < 2) bad = r;
+    }
+    return finish_stdout() ? 2 : bad;
+}
+
+/* ---- stat ---- */
+
+static const char *st_kind(mode_t m)
+{
+    if (S_ISREG(m)) return "regular file"; if (S_ISDIR(m)) return "directory"; if (S_ISLNK(m)) return "symbolic link";
+    if (S_ISCHR(m)) return "character special file"; if (S_ISBLK(m)) return "block special file"; if (S_ISFIFO(m)) return "fifo";
+    if (S_ISSOCK(m)) return "socket";
+    return "weird file";
+}
+
+static void st_time(char *out, time_t t, long ns)
+{
+    struct tm *g = gmtime(&t);
+    strftime(out, 48, "%Y-%m-%d %H:%M:%S", g);
+    sprintf(out + strlen(out), ".%09ld +0000", ns);
+}
+
+static void st_perm(mode_t m, char *s) { mode_string(m, s + 1); s[0] = ls_type(m); }
+
+static void st_quote(const char *s)
+{
+    const char *p;
+    for (p = s; *p; p++) if (!isalnum((unsigned char)*p) && !strchr("_-./:,%+=@~^", *p)) break;
+    if (!*p && *s) { fputs(s, stdout); return; }
+    putchar('\'');
+    for (p = s; *p; p++) { if (*p == '\'') fputs("'\\''", stdout); else putchar(*p); }
+    putchar('\'');
+}
+
+static void st_format(const char *fmt, const char *name, const struct stat *st, int deref, int esc)
+{
+    const char *p;
+    char b[64];
+    for (p = fmt; *p; p++) {
+        char flag = 0;
+        int width = 0;
+        if (esc && *p == '\\') {
+            char eb[8];
+            size_t en;
+            int stop = 0;
+            p = pf_esc(p + 1, 0, eb, &en, &stop) - 1;
+            fwrite(eb, 1, en, stdout);
+            continue;
+        }
+        if (*p != '%') { putchar(*p); continue; }
+        p++;
+        if (*p == '-' || *p == '0' || *p == '+' || *p == ' ' || *p == '#') flag = *p++;
+        while (isdigit((unsigned char)*p)) width = width * 10 + *p++ - '0';
+        switch (*p) {
+        case '%': putchar('%'); break;
+        case 'a': snprintf(b, sizeof b, "%o", st->st_mode & 07777); break;
+        case 'A': st_perm(st->st_mode, b); break;
+        case 'b': snprintf(b, sizeof b, "%lld", (long long)st->st_blocks); break;
+        case 'B': strcpy(b, "512"); break;
+        case 'd': snprintf(b, sizeof b, "%lu", (unsigned long)st->st_dev); break;
+        case 'D': snprintf(b, sizeof b, "%lx", (unsigned long)st->st_dev); break;
+        case 'f': snprintf(b, sizeof b, "%x", st->st_mode); break;
+        case 'F': snprintf(b, sizeof b, "%s", st_kind(st->st_mode)); break;
+        case 'g': snprintf(b, sizeof b, "%u", st->st_gid); break;
+        case 'G': snprintf(b, sizeof b, "%s", group_name(st->st_gid)); break;
+        case 'h': snprintf(b, sizeof b, "%lu", (unsigned long)st->st_nlink); break;
+        case 'i': snprintf(b, sizeof b, "%lu", (unsigned long)st->st_ino); break;
+        case 'm': strcpy(b, "/"); break;
+        case 'n': snprintf(b, sizeof b, "%s", name); break;
+        case 'N': {
+            if (S_ISLNK(st->st_mode) && !deref) {
+                char t[PATH_MAX];
+                ssize_t n = readlink(name, t, sizeof t - 1);
+                if (n >= 0) { t[n] = 0; st_quote(name); fputs(" -> ", stdout); st_quote(t); b[0] = 0; width = 0; break; }
+            }
+            st_quote(name); b[0] = 0; width = 0;
+            break;
+        }
+        case 'o': strcpy(b, "4096"); break;
+        case 's': snprintf(b, sizeof b, "%lld", (long long)st->st_size); break;
+        case 't': snprintf(b, sizeof b, "%lx", (unsigned long)((st->st_rdev >> 8) & 0xfff)); break;
+        case 'T': snprintf(b, sizeof b, "%lx", (unsigned long)((st->st_rdev & 0xff) | ((st->st_rdev >> 12) & 0xfff00))); break;
+        case 'u': snprintf(b, sizeof b, "%u", st->st_uid); break;
+        case 'U': snprintf(b, sizeof b, "%s", user_name(st->st_uid)); break;
+        case 'w': strcpy(b, "-"); break;
+        case 'W': strcpy(b, "0"); break;
+        case 'x': st_time(b, st->st_atime, st->st_atime_nsec); break;
+        case 'y': st_time(b, st->st_mtime, st->st_mtime_nsec); break;
+        case 'z': st_time(b, st->st_ctime, st->st_ctime_nsec); break;
+        case 'X': snprintf(b, sizeof b, "%ld", (long)st->st_atime); break;
+        case 'Y': snprintf(b, sizeof b, "%ld", (long)st->st_mtime); break;
+        case 'Z': snprintf(b, sizeof b, "%ld", (long)st->st_ctime); break;
+        default: putchar('?'); b[0] = 0; width = 0; break;
+        }
+        if (b[0] || width) {
+            if (flag == '-') printf("%-*s", width, b);
+            else if (flag == '0' && strchr("abdDfghiosTtuWXYZ", *p)) printf("%0*s", width, b);
+            else printf("%*s", width, b);
+        }
+        b[0] = 0;
+    }
+}
+
+static int t_stat(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "dereference", 0, 'L' }, { "format", 1, 'c' }, { "printf", 1, 'p' }, { "terse", 0, 't' }, { "file-system", 0, 'f' }, { NULL, 0, 0 } };
+    int c, deref = 0, terse = 0, fsys = 0, i, bad = 0, nl = 1, esc = 0;
+    const char *fmt = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, "Lc:tf", lo)))
+        switch (c) {
+        case 'L': deref = 1; break; case 'c': fmt = optarg; break; case 'p': fmt = optarg; nl = 0; esc = 1; break;
+        case 't': terse = 1; break; case 'f': fsys = 1; break; default: break;
+        }
+    if (!nops) missing_operand();
+    for (i = 0; i < nops; i++) {
+        struct stat st;
+        if ((deref ? stat(ops[i], &st) : lstat(ops[i], &st)) < 0) { perr("cannot statx '%s'", ops[i]); bad = 1; continue; }
+        if (fsys) {
+            struct statfs f;
+            if (statfs(ops[i], &f) < 0) { perr("cannot read file system information for '%s'", ops[i]); bad = 1; continue; }
+            printf("  File: \"%s\"\n    ID: %lx Namelen: %ld     Type: ext2/ext3\nBlock size: %ld      Fundamental block size: %ld\nBlocks: Total: %lu   Free: %lu   Available: %lu\nInodes: Total: %lu   Free: %lu\n",
+                   ops[i], 0UL, (long)f.f_namelen, (long)f.f_bsize, (long)f.f_bsize, (unsigned long)f.f_blocks, (unsigned long)f.f_bfree, (unsigned long)f.f_bavail,
+                   (unsigned long)f.f_files, (unsigned long)f.f_ffree);
+            continue;
+        }
+        if (fmt) { st_format(fmt, ops[i], &st, deref, esc); if (nl) putchar('\n'); continue; }
+        if (terse) {
+            printf("%s %lld %lld %x %u %u %lx %lu %lu %lx %lx %ld %ld %ld %d 4096\n", ops[i], (long long)st.st_size, (long long)st.st_blocks, st.st_mode, st.st_uid, st.st_gid,
+                   (unsigned long)st.st_dev, (unsigned long)st.st_ino, (unsigned long)st.st_nlink, (unsigned long)((st.st_rdev >> 8) & 0xfff),
+                   (unsigned long)((st.st_rdev & 0xff) | ((st.st_rdev >> 12) & 0xfff00)), (long)st.st_atime, (long)st.st_mtime, (long)st.st_ctime, 0);
+            continue;
+        }
+        {
+            char perm[16], a[48], m[48], ch[48];
+            st_perm(st.st_mode, perm);
+            st_time(a, st.st_atime, st.st_atime_nsec); st_time(m, st.st_mtime, st.st_mtime_nsec); st_time(ch, st.st_ctime, st.st_ctime_nsec);
+            printf("  File: ");
+            st_format("%N", ops[i], &st, deref, 0);
+            printf("\n  Size: %-10lld\tBlocks: %-10lld IO Block: %-6d %s\n", (long long)st.st_size, (long long)st.st_blocks, 4096, st_kind(st.st_mode));
+            printf("Device: %lu,%lu\tInode: %-10lu  Links: %lu", (unsigned long)(st.st_dev >> 8), (unsigned long)(st.st_dev & 255), (unsigned long)st.st_ino, (unsigned long)st.st_nlink);
+            if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) printf("     Device type: %lx,%lx", (unsigned long)((st.st_rdev >> 8) & 0xfff), (unsigned long)(st.st_rdev & 0xff));
+            printf("\nAccess: (%04o/%s)  Uid: (%5u/%8s)   Gid: (%5u/%8s)\n", st.st_mode & 07777, perm, st.st_uid, user_name(st.st_uid), st.st_gid, group_name(st.st_gid));
+            printf("Access: %s\nModify: %s\nChange: %s\n Birth: -\n", a, m, ch);
+        }
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- du ---- */
+
+struct du { int all, human, si, sum, total, apparent, xdev, deref, zero, null; long depth; unsigned long long blk; dev_t dev; };
+struct seen { dev_t d; ino_t i; };
+static struct seen *du_seen;
+static size_t du_nseen, du_cap;
+
+static int du_hard(const struct stat *st)
+{
+    size_t i;
+    if (st->st_nlink < 2) return 0;
+    for (i = 0; i < du_nseen; i++) if (du_seen[i].d == st->st_dev && du_seen[i].i == st->st_ino) return 1;
+    if (du_nseen == du_cap) { du_cap = du_cap ? du_cap * 2 : 256; du_seen = xrealloc(du_seen, du_cap * sizeof *du_seen); }
+    du_seen[du_nseen].d = st->st_dev; du_seen[du_nseen].i = st->st_ino; du_nseen++;
+    return 0;
+}
+
+static void du_print(const struct du *o, unsigned long long bytes, const char *name)
+{
+    char buf[32];
+    if (o->human) { L.si = o->si; ls_human(bytes, buf); }
+    else sprintf(buf, "%llu", o->blk == 1 ? bytes : (bytes + o->blk - 1) / o->blk);
+    printf("%s\t%s%c", buf, name, o->null ? 0 : '\n');
+}
+
+static int du_walk(const struct du *o, const char *path, int level, int top, unsigned long long *out, int *bad)
+{
+    struct stat st;
+    unsigned long long mine, sub = 0;
+    if ((o->deref ? stat(path, &st) : lstat(path, &st)) < 0) { perr("cannot access '%s'", path); *bad = 1; return 0; }
+    if (o->xdev && !top && st.st_dev != o->dev) return 0;
+    if (du_hard(&st)) return 0;
+    mine = o->apparent ? (S_ISDIR(st.st_mode) ? 0 : (unsigned long long)st.st_size) : (unsigned long long)st.st_blocks * 512;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        struct dirent *e;
+        if (!d) { perr("cannot read directory '%s'", path); *bad = 1; }
+        else {
+            char **names = NULL;
+            int n = 0, cap = 0, i;
+            while ((e = readdir(d))) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                if (n == cap) { cap = cap ? cap * 2 : 32; names = xrealloc(names, cap * sizeof *names); }
+                names[n++] = xstrdup(e->d_name);
+            }
+            closedir(d);
+            for (i = 0; i < n; i++) {
+                char *child = xmalloc(strlen(path) + strlen(names[i]) + 2);
+                unsigned long long got = 0;
+                sprintf(child, "%s%s%s", path, path[strlen(path) - 1] == '/' ? "" : "/", names[i]);
+                du_walk(o, child, level + 1, 0, &got, bad);
+                sub += got;
+                free(child); free(names[i]);
+            }
+            free(names);
+        }
+    }
+    *out = mine + sub;
+    if ((S_ISDIR(st.st_mode) ? 1 : o->all || top) && !o->sum && (o->depth < 0 || level <= o->depth)) du_print(o, *out, path);
+    else if (o->sum && top) du_print(o, *out, path);
+    return 0;
+}
+
+static int t_du(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "all", 0, 'a' }, { "human-readable", 0, 'h' }, { "si", 0, 'H' }, { "summarize", 0, 's' }, { "total", 0, 'c' },
+        { "apparent-size", 0, 'A' }, { "bytes", 0, 'b' }, { "max-depth", 1, 'd' }, { "one-file-system", 0, 'x' }, { "dereference", 0, 'L' },
+        { "block-size", 1, 'B' }, { "null", 0, '0' }, { "separate-dirs", 0, 'S' }, { NULL, 0, 0 } };
+    struct du o;
+    int c, i, bad = 0;
+    unsigned long long grand = 0;
+    memset(&o, 0, sizeof o);
+    o.depth = -1; o.blk = 1024;
+    opts_reset();
+    while ((c = getopts(argc, argv, "ahsckmbd:xLPB:0SH", lo)))
+        switch (c) {
+        case 'a': o.all = 1; break; case 'h': o.human = 1; break; case 'H': o.human = o.si = 1; break; case 's': o.sum = 1; break;
+        case 'c': o.total = 1; break; case 'A': o.apparent = 1; break; case 'b': o.apparent = 1; o.blk = 1; break;
+        case 'k': o.blk = 1024; break; case 'm': o.blk = 1 << 20; break; case 'x': o.xdev = 1; break; case 'L': o.deref = 1; break;
+        case '0': o.null = 1; break;
+        case 'd': o.depth = atol(optarg); break;
+        case 'B': { unsigned long long v; if (parse_size(optarg, &v) < 0) die(1, "invalid -B argument '%s'", optarg); o.blk = v; break; }
+        default: break;
+        }
+    if (!nops) ops[nops++] = ".";
+    for (i = 0; i < nops; i++) {
+        struct stat st;
+        unsigned long long got = 0;
+        if (o.xdev && stat(ops[i], &st) == 0) o.dev = st.st_dev;
+        du_walk(&o, ops[i], 0, 1, &got, &bad);
+        grand += got;
+    }
+    if (o.total) du_print(&o, grand, "total");
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- df ---- */
+
+static int t_df(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "human-readable", 0, 'h' }, { "si", 0, 'H' }, { "print-type", 0, 'T' }, { "all", 0, 'a' }, { "portability", 0, 'P' },
+        { "block-size", 1, 'B' }, { "local", 0, 'l' }, { "inodes", 0, 'i' }, { "total", 0, 't' + 256 }, { NULL, 0, 0 } };
+    int c, human = 0, kind = 0, all = 0, inodes = 0, bad = 0, any = 0, i;
+    unsigned long long blk = 1024;
+    FILE *f;
+    char *line = NULL;
+    size_t cap = 0;
+    char **dev = NULL, **mnt = NULL, **typ = NULL;
+    int n = 0, m = 0;
+    opts_reset();
+    while ((c = getopts(argc, argv, "hHTaPkB:lit", lo)))
+        switch (c) {
+        case 'h': human = 1; break; case 'H': human = 2; break; case 'T': kind = 1; break; case 'a': all = 1; break; case 'P': break;
+        case 'k': blk = 1024; break; case 'l': break; case 'i': inodes = 1; break;
+        case 'B': { unsigned long long v; if (parse_size(optarg, &v) < 0) die(1, "invalid --block-size argument '%s'", optarg); blk = v; break; }
+        default: break;
+        }
+    f = fopen("/proc/self/mounts", "r");
+    if (!f) { perr("cannot read table of mounted file systems"); return 1; }
+    while (getline(&line, &cap, f) > 0) {
+        char d[256], mp[256], t[64];
+        {
+            char *a = line, *b, *e;
+            b = strchr(a, ' '); if (!b) continue; *b++ = 0;
+            e = strchr(b, ' '); if (!e) continue; *e++ = 0;
+            strncpy(d, a, 255); d[255] = 0; strncpy(mp, b, 255); mp[255] = 0;
+            a = e; b = strchr(a, ' '); if (b) *b = 0;
+            strncpy(t, a, 63); t[63] = 0;
+        }
+        if (m == n) { m = m ? m * 2 : 32; dev = xrealloc(dev, m * sizeof *dev); mnt = xrealloc(mnt, m * sizeof *mnt); typ = xrealloc(typ, m * sizeof *typ); }
+        {
+            char *o = mp, *w = mp;
+            while (*o) { if (o[0] == '\\' && isdigit((unsigned char)o[1]) && isdigit((unsigned char)o[2]) && isdigit((unsigned char)o[3])) { *w++ = ((o[1] - '0') << 6) | ((o[2] - '0') << 3) | (o[3] - '0'); o += 4; } else *w++ = *o++; }
+            *w = 0;
+        }
+        dev[n] = xstrdup(d); mnt[n] = xstrdup(mp); typ[n] = xstrdup(t); n++;
+    }
+    fclose(f);
+    {
+        int j, count = nops ? nops : n;
+        for (j = 0; j < count; j++) {
+            int idx = -1;
+            struct statfs s;
+            struct stat st;
+            char sz[3][32], pct[8];
+            if (nops) {
+                struct stat ms;
+                if (stat(ops[j], &st) < 0) { perr("%s", ops[j]); bad = 1; continue; }
+                for (i = 0; i < n; i++) if (stat(mnt[i], &ms) == 0 && ms.st_dev == st.st_dev) idx = i;
+                if (idx < 0) { say("%s: can't find mount point", ops[j]); bad = 1; continue; }
+            } else idx = j;
+            if (statfs(mnt[idx], &s) < 0) continue;
+            if (!nops && !all && (s.f_blocks == 0 || !strcmp(typ[idx], "autofs"))) continue;
+            if (!nops && !all) {
+                int dup = 0, k;
+                for (k = 0; k < idx; k++) if (!strcmp(dev[k], dev[idx]) && dev[idx][0] == '/') dup = 1;
+                if (dup) continue;
+            }
+            if (!any) {
+                if (inodes) printf("%-14s%s %9s %9s %9s %4s %s\n", "Filesystem", kind ? "Type          " : "", "Inodes", "IUsed", "IFree", "IUse%", "Mounted on");
+                else if (human) printf("%-14s%s %5s %5s %5s %4s %s\n", "Filesystem", kind ? "Type          " : "", "Size", "Used", "Avail", "Use%", "Mounted on");
+                else printf("%-14s%s %9s %9s %9s %4s %s\n", "Filesystem", kind ? "Type          " : "", blk == 1024 ? "1K-blocks" : "Blocks", "Used", "Available", "Use%", "Mounted on");
+            }
+            any = 1;
+            if (inodes) {
+                unsigned long long tot = s.f_files, fr = s.f_ffree, us = tot - fr;
+                sprintf(pct, tot ? "%llu%%" : "-", tot ? (us * 100 + tot - 1) / tot : 0);
+                printf("%-14s%s%s %9llu %9llu %9llu %4s %s\n", dev[idx], kind ? " " : "", kind ? typ[idx] : "", tot, us, fr, pct, mnt[idx]);
+                continue;
+            }
+            {
+                unsigned long long bs = s.f_bsize, tot = s.f_blocks * bs, fr = s.f_bfree * bs, av = s.f_bavail * bs, us = tot - fr;
+                unsigned long long usedp = us + av ? (us * 100 + (us + av) - 1) / (us + av) : 0;
+                if (human) {
+                    L.si = human == 2;
+                    ls_human(tot, sz[0]); ls_human(us, sz[1]); ls_human(av, sz[2]);
+                } else {
+                    sprintf(sz[0], "%llu", (tot + blk - 1) / blk); sprintf(sz[1], "%llu", (us + blk - 1) / blk); sprintf(sz[2], "%llu", av / blk);
+                }
+                if (tot) sprintf(pct, "%llu%%", usedp); else strcpy(pct, "-");
+                if (kind) printf("%-14s %-13s", dev[idx], typ[idx]); else printf("%-14s", dev[idx]);
+                if (human) printf(" %5s %5s %5s %4s %s\n", sz[0], sz[1], sz[2], pct, mnt[idx]);
+                else printf(" %9s %9s %9s %4s %s\n", sz[0], sz[1], sz[2], pct, mnt[idx]);
+            }
+        }
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- date ---- */
+
+static int t_date(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "date", 1, 'd' }, { "utc", 0, 'u' }, { "universal", 0, 'u' }, { "reference", 1, 'r' }, { "iso-8601", 2, 'I' },
+        { "rfc-email", 0, 'R' }, { "rfc-2822", 0, 'R' }, { "set", 1, 's' }, { NULL, 0, 0 } };
+    int c;
+    const char *ds = NULL, *ref = NULL, *iso = NULL, *fmt = "%a %b %e %H:%M:%S %Z %Y";
+    int rfc = 0, haveiso = 0;
+    struct timespec ts;
+    struct tm tm;
+    char out[512], f2[512], *o;
+    const char *p;
+    opts_reset();
+    while ((c = getopts(argc, argv, "d:ur:I::Rs:", lo)))
+        switch (c) {
+        case 'd': ds = optarg; break; case 'r': ref = optarg; break; case 'u': break;
+        case 'I': haveiso = 1; iso = optarg; break; case 'R': rfc = 1; break;
+        case 's': die(1, "cannot set date: Operation not permitted"); break;
+        default: break;
+        }
+    if (nops > 1) extra_operand(ops[1]);
+    if (nops && ops[0][0] == '+') fmt = ops[0] + 1;
+    else if (nops) die(1, "invalid date '%s'", ops[0]);
+    if (ref) {
+        struct stat st;
+        if (stat(ref, &st) < 0) { perr("%s", ref); return 1; }
+        ts.tv_sec = st.st_mtime; ts.tv_nsec = st.st_mtime_nsec;
+    } else if (ds) {
+        if (parse_date(ds, &ts) < 0) die(1, "invalid date '%s'", ds);
+    } else clock_gettime(0, &ts);
+    if (rfc) fmt = "%a, %d %b %Y %H:%M:%S %z";
+    if (haveiso) {
+        if (!iso || !strcmp(iso, "date")) fmt = "%Y-%m-%d";
+        else if (!strcmp(iso, "hours")) fmt = "%Y-%m-%dT%H%z";
+        else if (!strcmp(iso, "minutes")) fmt = "%Y-%m-%dT%H:%M%z";
+        else if (!strcmp(iso, "seconds")) fmt = "%Y-%m-%dT%H:%M:%S%z";
+        else if (!strcmp(iso, "ns")) fmt = "%Y-%m-%dT%H:%M:%S,%N%z";
+        else die(1, "invalid argument '%s' for '--iso-8601'", iso);
+    }
+    tm = *gmtime(&ts.tv_sec);
+    o = f2;
+    for (p = fmt; *p && o < f2 + sizeof f2 - 24; p++) {
+        if (p[0] == '%' && p[1] == 'N') { o += sprintf(o, "%09ld", ts.tv_nsec); p++; }
+        else if (p[0] == '%' && p[1] == '%') { *o++ = '%'; *o++ = '%'; p++; }
+        else if (p[0] == '%' && p[1] == ':' && p[2] == 'z') { o += sprintf(o, "+00:00"); p += 2; }
+        else if (p[0] == '%' && p[1] == 'z' && haveiso) { o += sprintf(o, "+00:00"); p++; }
+        else if (p[0] == '%' && p[1] == 'U') { o += sprintf(o, "%02d", (tm.tm_yday + 7 - tm.tm_wday) / 7); p++; }
+        else if (p[0] == '%' && p[1] == 'W') { o += sprintf(o, "%02d", (tm.tm_yday + 7 - (tm.tm_wday + 6) % 7) / 7); p++; }
+        else *o++ = *p;
+    }
+    *o = 0;
+    if (!strftime(out, sizeof out, f2, &tm)) out[0] = 0;
+    puts(out);
+    return finish_stdout() ? 1 : 0;
+}
+/* ---- install ---- */
+
+static int make_dirs(const char *path, mode_t mode, int verbose, int leaf_only_mode)
+{
+    char *p = xstrdup(path), *s;
+    int r = 0;
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') p[--n] = 0;
+    for (s = p + 1; *s; s++) {
+        if (*s != '/') continue;
+        *s = 0;
+        if (mkdir(p, 0777 & ~current_umask()) == 0 && verbose) printf("%s: creating directory '%s'\n", prog, p);
+        *s = '/';
+    }
+    if (mkdir(p, mode) == 0) { if (verbose) printf("%s: creating directory '%s'\n", prog, p); if (leaf_only_mode) chmod(p, mode); }
+    else if (errno != EEXIST) { perr("cannot create directory '%s'", p); r = 1; }
+    free(p);
+    return r;
+}
+
+static int t_install(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "directory", 0, 'd' }, { "mode", 1, 'm' }, { "owner", 1, 'o' }, { "group", 1, 'g' }, { "verbose", 0, 'v' },
+        { "preserve-timestamps", 0, 'p' }, { "target-directory", 1, 't' }, { "no-target-directory", 0, 'T' }, { "compare", 0, 'C' }, { "strip", 0, 's' }, { NULL, 0, 0 } };
+    int c, dirmode = 0, mkparents = 0, verbose = 0, preserve = 0, notdir = 0, bad = 0, i, nsrc;
+    mode_t mode = 0755;
+    uid_t uid = -1; gid_t gid = -1;
+    const char *tdir = NULL;
+    char **srcs;
+    opts_reset();
+    while ((c = getopts(argc, argv, "dDm:o:g:cvpt:TCsb", lo)))
+        switch (c) {
+        case 'd': dirmode = 1; break; case 'D': mkparents = 1; break;
+        case 'm': {
+            struct change *ch = mode_compile(optarg);
+            if (!ch) die(1, "invalid mode '%s'", optarg);
+            mode = mode_apply(0, 0, 0, ch);
+            break;
+        }
+        case 'o': if (lookup_user(optarg, &uid) < 0) die(1, "invalid user '%s'", optarg); break;
+        case 'g': if (lookup_group(optarg, &gid) < 0) die(1, "invalid group '%s'", optarg); break;
+        case 'v': verbose = 1; break; case 'p': preserve = 1; break; case 't': tdir = optarg; break; case 'T': notdir = 1; break;
+        default: break;
+        }
+    if (dirmode) {
+        if (!nops) { say("missing file operand"); usage_error(); }
+        for (i = 0; i < nops; i++) {
+            bad |= make_dirs(ops[i], mode, verbose, 1);
+            if (uid != (uid_t)-1 || gid != (gid_t)-1) chown(ops[i], uid, gid);
+        }
+        return finish_stdout() ? 1 : bad;
+    }
+    if (!nops) { say("missing file operand"); usage_error(); }
+    if (!tdir && nops == 1) { say("missing destination file operand after '%s'", ops[0]); usage_error(); }
+    plan_dest(tdir, notdir, 1, &tdir, &srcs, &nsrc);
+    for (i = 0; i < nsrc; i++) {
+        struct cp o;
+        char *dest = tdir ? dest_in(tdir, srcs[i]) : xstrdup(ops[nops - 1]), *dir;
+        struct stat st;
+        memset(&o, 0, sizeof o);
+        o.follow_all = o.follow_top = 1; o.verbose = verbose; o.preserve = preserve; o.um = 0;
+        if (stat(srcs[i], &st) < 0) { perr("cannot stat '%s'", srcs[i]); bad = 1; free(dest); continue; }
+        if (S_ISDIR(st.st_mode)) { say("omitting directory '%s'", srcs[i]); bad = 1; free(dest); continue; }
+        if (mkparents) {
+            dir = xstrdup(dest);
+            { char *sl = strrchr(dir, '/'); if (sl && sl != dir) { *sl = 0; bad |= make_dirs(dir, 0755, verbose, 0); } }
+            free(dir);
+        }
+        unlink(dest);
+        if (cp_one(&o, srcs[i], dest, 1)) { bad = 1; free(dest); continue; }
+        if (chmod(dest, mode) < 0) { perr("cannot set permissions of '%s'", dest); bad = 1; }
+        if ((uid != (uid_t)-1 || gid != (gid_t)-1) && chown(dest, uid, gid) < 0) { perr("cannot change ownership of '%s'", dest); bad = 1; }
+        free(dest);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- timeout nice nohup chroot ---- */
+
+static int sig_number(const char *s)
+{
+    static const struct { const char *n; int v; } t[] = { { "HUP", 1 }, { "INT", 2 }, { "QUIT", 3 }, { "ILL", 4 }, { "TRAP", 5 }, { "ABRT", 6 }, { "BUS", 7 },
+        { "FPE", 8 }, { "KILL", 9 }, { "USR1", 10 }, { "SEGV", 11 }, { "USR2", 12 }, { "PIPE", 13 }, { "ALRM", 14 }, { "TERM", 15 }, { "CHLD", 17 },
+        { "CONT", 18 }, { "STOP", 19 }, { "TSTP", 20 }, { "TTIN", 21 }, { "TTOU", 22 }, { "EXIT", 0 }, { NULL, 0 } };
+    unsigned long v;
+    int i;
+    if (parse_ulong(s, &v)) return (int)v;
+    if (!strncmp(s, "SIG", 3)) s += 3;
+    for (i = 0; t[i].n; i++) if (!strcmp(t[i].n, s)) return t[i].v;
+    return -1;
+}
+
+static int parse_secs(const char *s, double *out)
+{
+    char *e;
+    double v;
+    if (!(isdigit((unsigned char)*s) || *s == '.')) return -1;
+    v = strtod(s, &e);
+    if (e == s) return -1;
+    if (*e == 's') e++; else if (*e == 'm') { v *= 60; e++; } else if (*e == 'h') { v *= 3600; e++; } else if (*e == 'd') { v *= 86400; e++; }
+    if (*e) return -1;
+    *out = v;
+    return 0;
+}
+
+static double mono(void)
+{
+    struct timespec t;
+    clock_gettime(1, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static int t_timeout(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "signal", 1, 's' }, { "kill-after", 1, 'k' }, { "preserve-status", 0, 'p' }, { "foreground", 0, 'f' }, { "verbose", 0, 'v' }, { NULL, 0, 0 } };
+    int c, sig = 15, keep = 0, verbose = 0, st = 0, killed_by_us = 0;
+    double dur, kill_after = 0;
+    pid_t pid;
+    double start, limit;
+    usage_status = 125;
+    opts_reset();
+    while ((c = getopts(argc, argv, "+s:k:pfv", lo)))
+        switch (c) {
+        case 's': sig = sig_number(optarg); if (sig < 0) die(125, "%s: invalid signal", optarg); break;
+        case 'k': if (parse_secs(optarg, &kill_after) < 0) die(125, "invalid time interval '%s'", optarg); break;
+        case 'p': keep = 1; break; case 'v': verbose = 1; break; default: break;
+        }
+    if (nops < 1) { say("missing operand"); usage_error(); }
+    if (nops < 2) { say("missing operand after '%s'", ops[0]); usage_error(); }
+    if (parse_secs(ops[0], &dur) < 0) die(125, "invalid time interval '%s'", ops[0]);
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) die(125, "fork system call failed: %s", strerror(errno));
+    if (!pid) {
+        execvp(ops[1], ops + 1);
+        fprintf(stderr, "%s: failed to run command '%s': %s\n", prog, ops[1], strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+    start = mono();
+    limit = dur ? start + dur : 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &st, 1);
+        if (r == pid) break;
+        if (r < 0 && errno != EINTR) die(125, "waitpid: %s", strerror(errno));
+        if (limit && mono() >= limit) {
+            if (!killed_by_us) {
+                if (verbose) fprintf(stderr, "%s: sending signal %d to command '%s'\n", prog, sig, ops[1]);
+                kill(pid, sig);
+                if (sig != 9 && sig != 19) kill(pid, 18);
+                killed_by_us = 1;
+                if (kill_after > 0) limit = mono() + kill_after; else limit = 0;
+            } else {
+                kill(pid, 9);
+                killed_by_us = 2;
+                limit = 0;
+            }
+        }
+        {
+            struct timespec ts = { 0, 2000000 };
+            nanosleep(&ts, NULL);
+        }
+    }
+    if ((st & 0x7f) == 0) {
+        int code = (st >> 8) & 255;
+        if (killed_by_us && !keep) return 124;
+        return code;
+    }
+    {
+        int s = st & 0x7f;
+        if (killed_by_us == 2) return keep ? 128 + s : 137;
+        if (killed_by_us && !keep && s != 9) return 124;
+        return 128 + s;
+    }
+}
+
+static int t_nice(int argc, char **argv)
+{
+    int adj = 10, i = 1, cur;
+    usage_status = 125;
+    if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "--version"))) {
+        if (argv[1][2] == 'h') print_usage(); else printf("nice (rifle) " VERSION "\n");
+        return 0;
+    }
+    if (i < argc && (!strcmp(argv[i], "-n") || !strcmp(argv[i], "--adjustment"))) {
+        if (i + 1 >= argc) die(125, "option requires an argument -- 'n'");
+        adj = atoi(argv[i + 1]); i += 2;
+    } else if (i < argc && !strncmp(argv[i], "--adjustment=", 13)) { adj = atoi(argv[i] + 13); i++; }
+    else if (i < argc && !strncmp(argv[i], "-n", 2) && argv[i][2]) { adj = atoi(argv[i] + 2); i++; }
+    else if (i < argc && argv[i][0] == '-' && (isdigit((unsigned char)argv[i][1]) || (argv[i][1] == '-' && isdigit((unsigned char)argv[i][2])))) {
+        adj = argv[i][1] == '-' ? -atoi(argv[i] + 2) : atoi(argv[i] + 1);
+        if (argv[i][1] != '-') adj = atoi(argv[i] + 1);
+        i++;
+    } else if (i < argc && argv[i][0] == '-' && argv[i][1] == '-' && !argv[i][2]) i++;
+    cur = getpriority(0, 0);
+    if (i >= argc) {
+        if (adj != 10 || argc > 1) { say("a command must be given with an adjustment"); usage_error(); }
+        printf("%d\n", 20 - cur);
+        return finish_stdout() ? 125 : 0;
+    }
+    {
+        int want = 20 - cur + adj;
+        if (want > 19) want = 19;
+        if (want < -20) want = -20;
+        if (setpriority(0, 0, want) < 0) fprintf(stderr, "%s: cannot set niceness: %s\n", prog, strerror(errno));
+    }
+    execvp(argv[i], argv + i);
+    fprintf(stderr, "%s: '%s': %s\n", prog, argv[i], strerror(errno));
+    return errno == ENOENT ? 127 : 126;
+}
+
+static int t_nohup(int argc, char **argv)
+{
+    int ign_in = isatty(0), ign_out = isatty(1), ign_err = isatty(2), saved = 0;
+    usage_status = 125;
+    if (argc == 2 && !strcmp(argv[1], "--help")) { print_usage(); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--version")) { printf("nohup (rifle) " VERSION "\n"); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "--")) { argv++; argc--; }
+    if (argc < 2) { say("missing operand"); usage_error(); }
+    if (ign_in) {
+        int fd = open("/dev/null", O_RDONLY);
+        if (fd >= 0) { dup2(fd, 0); if (fd) close(fd); }
+    }
+    if (ign_out) {
+        int fd = open("nohup.out", O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd < 0) {
+            char *home = getenv("HOME");
+            if (home) {
+                char p[PATH_MAX];
+                snprintf(p, sizeof p, "%s/nohup.out", home);
+                fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0600);
+            }
+        }
+        if (fd < 0) { fprintf(stderr, "%s: failed to open 'nohup.out': %s\n", prog, strerror(errno)); return 125; }
+        dup2(fd, 1); if (fd != 1) close(fd);
+        saved = 1;
+    }
+    if (ign_err) dup2(1, 2);
+    if (ign_in || ign_out || ign_err) {
+        fprintf(stderr, "%s: %s\n", prog, ign_in && saved ? "ignoring input and appending output to 'nohup.out'" :
+            ign_in && ign_err && !ign_out ? "ignoring input and redirecting stderr to stdout" : ign_in ? "ignoring input" :
+            saved ? "appending output to 'nohup.out'" : "redirecting stderr to stdout");
+    }
+    signal(SIGHUP, SIG_IGN);
+    execvp(argv[1], argv + 1);
+    fprintf(stderr, "%s: failed to run command '%s': %s\n", prog, argv[1], strerror(errno));
+    return errno == ENOENT ? 127 : 126;
+}
+
+static int t_chroot(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "skip-chdir", 0, 's' }, { "userspec", 1, 'u' }, { "groups", 1, 'g' }, { NULL, 0, 0 } };
+    int c, skip = 0;
+    usage_status = 125;
+    opts_reset();
+    while ((c = getopts(argc, argv, "+", lo))) if (c == 's') skip = 1;
+    if (!nops) { say("missing operand"); usage_error(); }
+    if (chroot(ops[0]) < 0) { fprintf(stderr, "%s: cannot change root directory to '%s': %s\n", prog, ops[0], strerror(errno)); return 125; }
+    if (!skip && chdir("/") < 0) { fprintf(stderr, "%s: cannot chdir to root directory: %s\n", prog, strerror(errno)); return 125; }
+    if (nops > 1) execvp(ops[1], ops + 1);
+    else {
+        char *sh = getenv("SHELL");
+        char *av[] = { sh ? sh : "/bin/sh", "-i", NULL };
+        execvp(av[0], av);
+    }
+    fprintf(stderr, "%s: failed to run command '%s': %s\n", prog, nops > 1 ? ops[1] : "/bin/sh", strerror(errno));
+    return errno == ENOENT ? 127 : 126;
+}
+
+/* ---- truncate ---- */
+
+static int t_truncate(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "size", 1, 's' }, { "no-create", 0, 'c' }, { "reference", 1, 'r' }, { "io-blocks", 0, 'o' }, { NULL, 0, 0 } };
+    int c, nocreate = 0, bad = 0, i;
+    const char *sz = NULL, *ref = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, "s:cr:o", lo)))
+        switch (c) { case 's': sz = optarg; break; case 'c': nocreate = 1; break; case 'r': ref = optarg; break; case 'o': break; default: break; }
+    if (!sz && !ref) { say("you must specify either '--size' or '--reference'"); usage_error(); }
+    if (!nops) { say("missing file operand"); usage_error(); }
+    for (i = 0; i < nops; i++) {
+        struct stat st;
+        long long cur = 0, want = 0;
+        int fd = open(ops[i], O_WRONLY | (nocreate ? 0 : O_CREAT), 0666);
+        char op = 0;
+        const char *s = sz;
+        if (fd < 0) { if (nocreate && errno == ENOENT) continue; perr("cannot open '%s' for writing", ops[i]); bad = 1; continue; }
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) cur = st.st_size;
+        if (ref) {
+            struct stat rs;
+            if (stat(ref, &rs) < 0) { perr("cannot stat '%s'", ref); return 1; }
+            want = rs.st_size;
+        }
+        if (s) {
+            unsigned long long n;
+            if (*s == '+' || *s == '-' || *s == '<' || *s == '>' || *s == '/' || *s == '%') op = *s++;
+            if (parse_size(s, &n) < 0) die(1, "Invalid number: '%s'", sz);
+            want = ref ? want : (long long)n;
+            if (ref) {
+                if (op == '+') want = cur + n; else if (op == '-') want = cur - n;
+            } else switch (op) {
+            case '+': want = cur + n; break; case '-': want = cur - n; break; case '<': want = cur < (long long)n ? cur : (long long)n; break;
+            case '>': want = cur > (long long)n ? cur : (long long)n; break;
+            case '/': want = n ? cur / n * n : cur; break; case '%': want = n ? (cur + n - 1) / n * n : cur; break;
+            }
+        }
+        if (want < 0) want = 0;
+        if (ftruncate(fd, want) < 0) { perr("failed to truncate '%s' at %lld bytes", ops[i], want); bad = 1; }
+        close(fd);
+    }
+    return bad;
+}
+
+/* ---- split ---- */
+
+static void split_name(char *out, const char *prefix, const char *add, unsigned long k, int numeric, unsigned long fixed)
+{
+    unsigned long base = numeric ? 10 : 26, w, i, cap;
+    size_t n = strlen(prefix);
+    int zs = 0;
+    strcpy(out, prefix);
+    if (fixed) {
+        w = fixed;
+        for (cap = 1, i = 0; i < w; i++) cap *= base;
+        if (k >= cap && w < 20) die(1, "output file suffixes exhausted");
+    } else {
+        w = 2;
+        for (;;) {
+            for (cap = base - 1, i = 1; i < w; i++) cap *= base;
+            if (k < cap) break;
+            k -= cap; zs++; w++;
+        }
+    }
+    for (i = 0; i < (unsigned long)zs; i++) out[n++] = numeric ? '9' : 'z';
+    for (i = w; i-- > 0; ) { out[n + i] = (numeric ? '0' : 'a') + k % base; k /= base; }
+    out[n + w] = 0;
+    strcat(out, add);
+}
+
+static int t_split(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "lines", 1, 'l' }, { "bytes", 1, 'b' }, { "number", 1, 'n' }, { "suffix-length", 1, 'a' }, { "numeric-suffixes", 2, 'd' },
+        { "additional-suffix", 1, 'x' + 256 }, { "verbose", 0, 'v' }, { "line-bytes", 1, 'C' }, { "elide-empty-files", 0, 'e' }, { NULL, 0, 0 } };
+    int c, numeric = 0, verbose = 0, fd, fdo = -1, elide = 0, autolen = 1;
+    unsigned long suflen = 2, lines = 1000;
+    unsigned long long bytes = 0, chunks = 0, lb = 0;
+    const char *prefix = "x", *add = "";
+    unsigned long idx = 0;
+    char *buf, *name = NULL;
+    size_t len, i;
+    int mode = 0;
+    opts_reset();
+    while ((c = getopts(argc, argv, "l:b:n:a:d::C:ev", lo)))
+        switch (c) {
+        case 'l': if (!parse_ulong(optarg, &lines) || !lines) die(1, "invalid number of lines: '%s'", optarg); mode = 0; break;
+        case 'b': if (parse_size(optarg, &bytes) < 0 || !bytes) die(1, "invalid number of bytes: '%s'", optarg); mode = 1; break;
+        case 'C': if (parse_size(optarg, &lb) < 0 || !lb) die(1, "invalid number of bytes: '%s'", optarg); mode = 2; break;
+        case 'n': { unsigned long v; if (!parse_ulong(optarg, &v) || !v) die(1, "invalid number of chunks: '%s'", optarg); chunks = v; mode = 3; break; }
+        case 'a': if (!parse_ulong(optarg, &suflen) || !suflen) die(1, "invalid suffix length: '%s'", optarg); autolen = 0; break;
+        case 'd': numeric = 1; break; case 'v': verbose = 1; break; case 'e': elide = 1; break;
+        case 'x' + 256: add = optarg; break;
+        default: break;
+        }
+    if (nops > 2) extra_operand(ops[2]);
+    if (nops == 2) prefix = ops[1];
+    fd = open_input(nops ? ops[0] : "-");
+    if (fd < 0) { perr("cannot open '%s' for reading", ops[0]); return 1; }
+    if (read_all(fd, &buf, &len) < 0) { perr("read error"); return 1; }
+    name = xmalloc(strlen(prefix) + strlen(add) + 128 + suflen);
+#define OPEN_NEXT() do { \
+        if (fdo >= 0) close(fdo); \
+        split_name(name, prefix, add, idx++, numeric, autolen ? 0 : suflen); \
+        if (verbose) printf("creating file '%s'\n", name); \
+        fdo = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0666); \
+        if (fdo < 0) { perr("%s", name); exit(1); } } while (0)
+    if (mode == 3) {
+        unsigned long long k, base = len / chunks, extra = len % chunks, pos = 0;
+        for (k = 0; k < chunks; k++) {
+            unsigned long long n = base + (k < extra);
+            if (elide && !n) continue;
+            OPEN_NEXT();
+            write_all(fdo, buf + pos, n);
+            pos += n;
+        }
+    } else if (mode == 1) {
+        for (i = 0; i < len; i += bytes) {
+            size_t n = len - i < bytes ? len - i : bytes;
+            OPEN_NEXT();
+            write_all(fdo, buf + i, n);
+        }
+    } else if (mode == 2) {
+        size_t start = 0;
+        while (start < len) {
+            size_t end = start, lastnl = 0;
+            int found = 0;
+            while (end < len && end - start < lb) { if (buf[end] == '\n') { lastnl = end + 1; found = 1; } end++; }
+            if (end < len && found) end = lastnl;
+            OPEN_NEXT();
+            write_all(fdo, buf + start, end - start);
+            start = end;
+        }
+    } else {
+        unsigned long long n = 0;
+        for (i = 0; i < len; i++) {
+            if (fdo < 0 || n == 0) { OPEN_NEXT(); }
+            {
+                size_t e = i;
+                while (e < len && buf[e] != '\n') e++;
+                if (e < len) e++;
+                write_all(fdo, buf + i, e - i);
+                i = e - 1;
+            }
+            if (++n == lines) { n = 0; if (i + 1 < len) { close(fdo); fdo = -1; } }
+        }
+    }
+    if (fdo >= 0) close(fdo);
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- expand unexpand ---- */
+
+static int t_expand(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "tabs", 1, 't' }, { "initial", 0, 'i' }, { "all", 0, 'a' }, { "first-only", 0, 'i' + 256 }, { NULL, 0, 0 } };
+    int un = !strcmp(prog, "unexpand"), c, init = 0, all = 0, i, bad = 0;
+    int tabs[128], ntabs = 0, step = 8;
+    opts_reset();
+    while ((c = getopts(argc, argv, un ? "at:" : "it:", lo)))
+        switch (c) {
+        case 'i': init = 1; break; case 'a': all = 1; break;
+        case 't': {
+            char *s = optarg, *e;
+            ntabs = 0;
+            while (*s) {
+                long v = strtol(s, &e, 10);
+                if (e == s || v < 0 || ((*e) && *e != ',' && *e != ' ')) die(1, "tab size contains invalid character(s): '%s'", s);
+                if (ntabs && v <= tabs[ntabs - 1]) die(1, "tab sizes must be ascending");
+                if (ntabs < 128) tabs[ntabs++] = v;
+                s = *e ? e + 1 : e;
+            }
+            if (ntabs == 1) { step = tabs[0]; if (!step) die(1, "tab size cannot be 0"); ntabs = 0; }
+            if (un) all = 1;
+            break;
+        }
+        default: break;
+        }
+    if (!nops) ops[nops++] = "-";
+    for (i = 0; i < nops; i++) {
+        FILE *f = !strcmp(ops[i], "-") ? stdin : fopen(ops[i], "r");
+        int ch, col = 0, blank = 1;
+        if (!f) { perr("%s", ops[i]); bad = 1; continue; }
+        {
+#define NEXT_STOP(col) (ntabs ? ({ int t_ = 0, k_; for (k_ = 0; k_ < ntabs; k_++) if (tabs[k_] > (col)) { t_ = tabs[k_]; break; } t_ ? t_ : (col) + 1; }) : ((col) / step + 1) * step)
+            if (!un) {
+                while ((ch = getc(f)) != EOF) {
+                    if (ch == '\t' && !(init && !blank)) { int nx = NEXT_STOP(col); while (col < nx) { putchar(' '); col++; } }
+                    else {
+                        putchar(ch);
+                        if (ch == '\n') { col = 0; blank = 1; } else if (ch == '\b') { if (col) col--; } else { col++; if (ch != ' ' && ch != '\t') blank = 0; }
+                        if (ch == '\t') col = NEXT_STOP(col - 1 > 0 ? col - 1 : 0);
+                    }
+                }
+            } else {
+                char *line = NULL;
+                size_t cap = 0;
+                ssize_t n;
+                while ((n = getline(&line, &cap, f)) >= 0) {
+                    ssize_t k = 0;
+                    int c2 = 0, pend = 0, pstart = 0;
+                    int leading = 1;
+                    for (k = 0; k < n; k++) {
+                        char x = line[k];
+                        if ((x == ' ' || x == '\t') && (all || leading)) {
+                            if (!pend) { pstart = c2; pend = 1; }
+                            if (x == '\t') c2 = NEXT_STOP(c2); else c2++;
+                            continue;
+                        }
+                        if (pend) {
+                            int cc = pstart;
+                            while (1) {
+                                int nx = NEXT_STOP(cc);
+                                if (nx <= c2 && nx - cc > 1) { putchar('\t'); cc = nx; }
+                                else break;
+                            }
+                            while (cc < c2) { putchar(' '); cc++; }
+                            pend = 0;
+                        }
+                        putchar(x);
+                        if (x == '\b') { if (c2) c2--; } else c2++;
+                        leading = 0;
+                    }
+                    if (pend) {
+                        int cc = pstart;
+                        while (1) { int nx = NEXT_STOP(cc); if (nx <= c2 && nx - cc > 1) { putchar('\t'); cc = nx; } else break; }
+                        while (cc < c2) { putchar(' '); cc++; }
+                    }
+                }
+                free(line);
+            }
+        }
+        if (f != stdin) fclose(f);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- shuf ---- */
+
+static unsigned long long rnd64(void)
+{
+    unsigned long long v;
+    if (getrandom(&v, sizeof v, 0) != (ssize_t)sizeof v) v = (unsigned long long)time(NULL) * 6364136223846793005ULL;
+    return v;
+}
+
+static unsigned long long rnd_below(unsigned long long n)
+{
+    unsigned long long lim = ~0ULL - (~0ULL % n), v;
+    do v = rnd64(); while (v >= lim);
+    return v % n;
+}
+
+static int t_shuf(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "echo", 0, 'e' }, { "input-range", 1, 'i' }, { "head-count", 1, 'n' }, { "repeat", 0, 'r' }, { "zero-terminated", 0, 'z' },
+        { "output", 1, 'o' }, { "random-source", 1, 'R' }, { NULL, 0, 0 } };
+    int c, echo = 0, rep = 0, zero = 0;
+    unsigned long long lo_ = 0, hi_ = 0, count = ~0ULL;
+    int haverange = 0;
+    char **items = NULL, *data = NULL;
+    size_t n = 0, i;
+    const char *outf = NULL;
+    FILE *out = stdout;
+    int sep;
+    opts_reset();
+    while ((c = getopts(argc, argv, "ei:n:rzo:", lo)))
+        switch (c) {
+        case 'e': echo = 1; break;
+        case 'i': {
+            char *dash = strchr(optarg, '-');
+            if (!dash) die(1, "invalid input range: '%s'", optarg);
+            lo_ = strtoull(optarg, NULL, 10); hi_ = strtoull(dash + 1, NULL, 10);
+            if (hi_ + 1 < lo_) die(1, "invalid input range: '%s'", optarg);
+            haverange = 1;
+            break;
+        }
+        case 'n': { unsigned long v; if (!parse_ulong(optarg, &v)) die(1, "invalid line count: '%s'", optarg); if (v < count) count = v; break; }
+        case 'r': rep = 1; break; case 'z': zero = 1; break; case 'o': outf = optarg; break;
+        default: break;
+        }
+    sep = zero ? 0 : '\n';
+    if (outf) { out = fopen(outf, "w"); if (!out) { perr("%s", outf); return 1; } }
+    if (haverange) {
+        unsigned long long k, total = hi_ - lo_ + 1;
+        unsigned long long *v;
+        if (rep) {
+            if (!total) die(1, "no lines to repeat");
+            for (k = 0; k < count; k++) fprintf(out, "%llu%c", lo_ + rnd_below(total), sep);
+        } else {
+            v = xmalloc((total ? total : 1) * sizeof *v);
+            for (k = 0; k < total; k++) v[k] = lo_ + k;
+            for (k = 0; k < total && k < count; k++) {
+                unsigned long long j = k + rnd_below(total - k), t = v[k];
+                v[k] = v[j]; v[j] = t;
+                fprintf(out, "%llu%c", v[k], sep);
+            }
+        }
+        return finish_stdout() ? 1 : 0;
+    }
+    if (echo) { items = ops; n = nops; }
+    else {
+        size_t len, cap = 0, start = 0;
+        int fd;
+        if (nops > 1) extra_operand(ops[1]);
+        fd = open_input(nops ? ops[0] : "-");
+        if (fd < 0) { perr("%s", ops[0]); return 1; }
+        if (read_all(fd, &data, &len) < 0) { perr("read error"); return 1; }
+        for (i = 0; i < len; i++) {
+            if ((unsigned char)data[i] == (unsigned)sep || (i + 1 == len)) {
+                if (n == cap) { cap = cap ? cap * 2 : 64; items = xrealloc(items, cap * sizeof *items); }
+                items[n++] = data + start;
+                if ((unsigned char)data[i] == (unsigned)sep) data[i] = 0; else { data = xrealloc(data, len + 1); data[len] = 0; items[n - 1] = data + start; }
+                start = i + 1;
+            }
+        }
+    }
+    if (rep) {
+        unsigned long long k;
+        if (!n) die(1, "no lines to repeat");
+        for (k = 0; k < count; k++) fprintf(out, "%s%c", items[rnd_below(n)], sep);
+    } else {
+        size_t k;
+        for (k = 0; k < n && k < count; k++) {
+            size_t j = k + rnd_below(n - k);
+            char *t = items[k];
+            items[k] = items[j]; items[j] = t;
+            fprintf(out, "%s%c", items[k], sep);
+        }
+    }
+    if (outf) fclose(out);
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- join ---- */
+
+struct jl { char *line; char **f; int nf; };
+
+static int jtab = -1, jicase;
+static const char *jempty = "";
+
+static void j_split(struct jl *l)
+{
+    char *p = l->line, **f = NULL;
+    int n = 0, cap = 0;
+    for (;;) {
+        char *s;
+        if (jtab < 0) while (*p == ' ' || *p == '\t') p++;
+        s = p;
+        if (jtab < 0) while (*p && *p != ' ' && *p != '\t') p++; else while (*p && *p != jtab) p++;
+        if (n == cap) { cap = cap ? cap * 2 : 8; f = xrealloc(f, cap * sizeof *f); }
+        f[n++] = xmalloc(p - s + 1);
+        memcpy(f[n - 1], s, p - s); f[n - 1][p - s] = 0;
+        if (!*p) break;
+        if (jtab >= 0) p++;
+        else { while (*p == ' ' || *p == '\t') p++; if (!*p) break; }
+    }
+    l->f = f; l->nf = n;
+}
+
+static int j_cmp(const char *a, const char *b) { return jicase ? strcasecmp(a, b) : strcmp(a, b); }
+
+static int j_read(const char *name, struct jl **out)
+{
+    int fd = open_input(name);
+    char *d;
+    size_t len, i, start = 0;
+    int n = 0, cap = 0;
+    struct jl *v = NULL;
+    if (fd < 0) { perr("%s", name); exit(1); }
+    if (read_all(fd, &d, &len) < 0) { perr("%s", name); exit(1); }
+    for (i = 0; i < len; i++) {
+        if (d[i] == '\n' || i + 1 == len) {
+            size_t e = d[i] == '\n' ? i : i + 1;
+            if (n == cap) { cap = cap ? cap * 2 : 64; v = xrealloc(v, cap * sizeof *v); }
+            v[n].line = xmalloc(e - start + 1);
+            memcpy(v[n].line, d + start, e - start); v[n].line[e - start] = 0;
+            j_split(&v[n]);
+            n++;
+            start = i + 1;
+        }
+    }
+    *out = v;
+    return n;
+}
+
+static int t_join(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "ignore-case", 0, 'i' }, { NULL, 0, 0 } };
+    int c, k1 = 1, k2 = 1, a1 = 0, a2 = 0, v1 = 0, v2 = 0, nf1, nf2, i1 = 0, i2 = 0, nout = 0;
+    struct jl *l1, *l2;
+    struct { int file, field; } outf[64];
+    int useout = 0;
+    opts_reset();
+    while ((c = getopts(argc, argv, "1:2:j:t:a:v:e:o:i", lo)))
+        switch (c) {
+        case '1': k1 = atoi(optarg); break; case '2': k2 = atoi(optarg); break; case 'j': k1 = k2 = atoi(optarg); break;
+        case 't': jtab = optarg[0]; break; case 'i': jicase = 1; break; case 'e': jempty = optarg; break;
+        case 'a': if (atoi(optarg) == 1) a1 = 1; else if (atoi(optarg) == 2) a2 = 1; else die(1, "invalid file number: '%s'", optarg); break;
+        case 'v': if (atoi(optarg) == 1) { v1 = 1; a1 = 1; } else if (atoi(optarg) == 2) { v2 = 1; a2 = 1; } else die(1, "invalid file number: '%s'", optarg); break;
+        case 'o': {
+            char *s = optarg;
+            useout = 1;
+            while (*s) {
+                if (!strncmp(s, "0", 1) && (s[1] == ',' || s[1] == ' ' || !s[1])) { outf[nout].file = 0; outf[nout].field = 0; nout++; s++; }
+                else {
+                    outf[nout].file = atoi(s); s += strspn(s, "0123456789");
+                    if (*s != '.') die(1, "invalid field specifier: '%s'", optarg);
+                    outf[nout].field = atoi(s + 1); s += 1 + strspn(s + 1, "0123456789"); nout++;
+                }
+                while (*s == ',' || *s == ' ') s++;
+            }
+            break;
+        }
+        default: break;
+        }
+    if (nops != 2) { if (nops < 2) { say("missing operand after '%s'", nops ? ops[nops - 1] : argv[0]); } else extra_operand(ops[2]); usage_error(); }
+    nf1 = j_read(ops[0], &l1);
+    nf2 = j_read(ops[1], &l2);
+#define EMIT_KEY(l, k) (((k) <= (l)->nf && (l)->f[(k) - 1][0]) ? (l)->f[(k) - 1] : jempty)
+    {
+        char sep = jtab >= 0 ? jtab : ' ';
+        while (i1 < nf1 || i2 < nf2) {
+            int r;
+            const char *ka = i1 < nf1 ? EMIT_KEY(&l1[i1], k1) : NULL, *kb = i2 < nf2 ? EMIT_KEY(&l2[i2], k2) : NULL;
+            if (!ka) r = 1; else if (!kb) r = -1; else r = j_cmp(ka, kb);
+            if (r < 0) {
+                if (a1) {
+                    struct jl *l = &l1[i1];
+                    int f;
+                    if (useout) { for (f = 0; f < nout; f++) { if (f) putchar(sep); if (outf[f].file == 0) fputs(ka, stdout); else if (outf[f].file == 1) fputs(outf[f].field <= l->nf ? l->f[outf[f].field - 1] : jempty, stdout); else fputs(jempty, stdout); } }
+                    else { fputs(ka, stdout); for (f = 0; f < l->nf; f++) if (f != k1 - 1) { putchar(sep); fputs(l->f[f], stdout); } }
+                    putchar('\n');
+                }
+                i1++;
+            } else if (r > 0) {
+                if (a2) {
+                    struct jl *l = &l2[i2];
+                    int f;
+                    if (useout) { for (f = 0; f < nout; f++) { if (f) putchar(sep); if (outf[f].file == 0) fputs(kb, stdout); else if (outf[f].file == 2) fputs(outf[f].field <= l->nf ? l->f[outf[f].field - 1] : jempty, stdout); else fputs(jempty, stdout); } }
+                    else { fputs(kb, stdout); for (f = 0; f < l->nf; f++) if (f != k2 - 1) { putchar(sep); fputs(l->f[f], stdout); } }
+                    putchar('\n');
+                }
+                i2++;
+            } else {
+                int e1 = i1, e2 = i2, x, y;
+                while (e1 < nf1 && !j_cmp(EMIT_KEY(&l1[e1], k1), ka)) e1++;
+                while (e2 < nf2 && !j_cmp(EMIT_KEY(&l2[e2], k2), kb)) e2++;
+                if (!v1 && !v2)
+                    for (x = i1; x < e1; x++)
+                        for (y = i2; y < e2; y++) {
+                            struct jl *a = &l1[x], *b = &l2[y];
+                            int f;
+                            if (useout) {
+                                for (f = 0; f < nout; f++) {
+                                    if (f) putchar(sep);
+                                    if (outf[f].file == 0) fputs(ka, stdout);
+                                    else { struct jl *l = outf[f].file == 1 ? a : b; fputs(outf[f].field <= l->nf && outf[f].field > 0 ? l->f[outf[f].field - 1] : jempty, stdout); }
+                                }
+                            } else {
+                                fputs(ka, stdout);
+                                for (f = 0; f < a->nf; f++) if (f != k1 - 1) { putchar(sep); fputs(a->f[f], stdout); }
+                                for (f = 0; f < b->nf; f++) if (f != k2 - 1) { putchar(sep); fputs(b->f[f], stdout); }
+                            }
+                            putchar('\n');
+                        }
+                i1 = e1; i2 = e2;
+            }
+        }
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- tsort ---- */
+
+static int t_tsort(int argc, char **argv)
+{
+    char *d, **names = NULL, *tok;
+    size_t len;
+    int fd, n = 0, cap = 0, ne = 0, ecap = 0, *ef = NULL, *et = NULL, *indeg, *done, *queue, qh = 0, qt = 0, bad = 0, emitted = 0, k;
+    opts_reset();
+    while (getopts(argc, argv, "", NULL)) {}
+    if (nops > 1) extra_operand(ops[1]);
+    fd = open_input(nops ? ops[0] : "-");
+    if (fd < 0) { perr("%s", ops[0]); return 1; }
+    if (read_all(fd, &d, &len) < 0) { perr("read error"); return 1; }
+    {
+        int pending = -1;
+        size_t p = 0;
+        d = xrealloc(d, len + 1); d[len] = 0;
+        while (p < len) {
+            int id = -1;
+            while (p < len && isspace((unsigned char)d[p])) p++;
+            if (p >= len) break;
+            tok = d + p;
+            while (p < len && !isspace((unsigned char)d[p])) p++;
+            d[p] = 0; p++;
+            for (k = 0; k < n; k++) if (!strcmp(names[k], tok)) { id = k; break; }
+            if (id < 0) { if (n == cap) { cap = cap ? cap * 2 : 64; names = xrealloc(names, cap * sizeof *names); } names[n] = tok; id = n++; }
+            if (pending < 0) pending = id;
+            else {
+                if (ne == ecap) { ecap = ecap ? ecap * 2 : 64; ef = xrealloc(ef, ecap * sizeof *ef); et = xrealloc(et, ecap * sizeof *et); }
+                ef[ne] = pending; et[ne] = id; ne++;
+                pending = -1;
+            }
+        }
+        if (pending >= 0) die(1, "%s: input contains an odd number of tokens", nops ? ops[0] : "-");
+    }
+    indeg = xmalloc((n + 1) * sizeof *indeg); done = xmalloc((n + 1) * sizeof *done); queue = xmalloc((n + 1) * sizeof *queue);
+    for (k = 0; k < n; k++) { indeg[k] = 0; done[k] = 0; }
+    for (k = 0; k < ne; k++) if (ef[k] != et[k]) indeg[et[k]]++;
+    for (k = 0; k < n; k++) if (!indeg[k]) queue[qt++] = k;
+    while (emitted < n) {
+        while (qh < qt) {
+            int u = queue[qh++];
+            done[u] = 1; emitted++;
+            puts(names[u]);
+            for (k = 0; k < ne; k++) if (ef[k] == u && et[k] != u && !--indeg[et[k]]) queue[qt++] = et[k];
+        }
+        if (emitted < n) {
+            int first = -1;
+            for (k = 0; k < n; k++) if (!done[k]) { if (first < 0) first = k; }
+            fflush(stdout);
+            say("%s: input contains a loop:", nops ? ops[0] : "-");
+            for (k = 0; k < n; k++) if (!done[k] && indeg[k]) fprintf(stderr, "%s: %s\n", prog, names[k]);
+            bad = 1;
+            indeg[first] = 0;
+            queue[qt++] = first;
+        }
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
+/* ---- factor ---- */
+
+typedef unsigned long long u64;
+
+static u64 mulmod(u64 a, u64 b, u64 m)
+{
+    u64 r;
+    __asm__("mulq %2\n divq %3" : "=&d"(r), "+a"(a) : "r"(b), "r"(m) : "cc");
+    return r;
+}
+
+static u64 powmod(u64 b, u64 e, u64 m)
+{
+    u64 r = 1;
+    b %= m;
+    while (e) { if (e & 1) r = mulmod(r, b, m); b = mulmod(b, b, m); e >>= 1; }
+    return r;
+}
+
+static int is_prime(u64 n)
+{
+    static const u64 bases[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37 };
+    u64 d = n - 1;
+    int s = 0, i;
+    if (n < 2) return 0;
+    for (i = 0; i < 12; i++) { if (n == bases[i]) return 1; if (n % bases[i] == 0) return 0; }
+    while (!(d & 1)) { d >>= 1; s++; }
+    for (i = 0; i < 12; i++) {
+        u64 x = powmod(bases[i], d, n);
+        int r;
+        if (x == 1 || x == n - 1) continue;
+        for (r = 1; r < s; r++) { x = mulmod(x, x, n); if (x == n - 1) break; }
+        if (r == s) return 0;
+    }
+    return 1;
+}
+
+static u64 gcd64(u64 a, u64 b) { while (b) { u64 t = a % b; a = b; b = t; } return a; }
+
+static u64 rho(u64 n)
+{
+    u64 c;
+    for (c = 1;; c++) {
+        u64 x = 2, y = 2, d = 1;
+        while (d == 1) {
+            x = (mulmod(x, x, n) + c) % n;
+            y = (mulmod(y, y, n) + c) % n;
+            y = (mulmod(y, y, n) + c) % n;
+            d = gcd64(x > y ? x - y : y - x, n);
+        }
+        if (d != n) return d;
+    }
+}
+
+static void factor_into(u64 n, u64 *out, int *cnt)
+{
+    if (n == 1) return;
+    if (is_prime(n)) { out[(*cnt)++] = n; return; }
+    {
+        u64 d = rho(n);
+        factor_into(d, out, cnt);
+        factor_into(n / d, out, cnt);
+    }
+}
+
+static int factor_one(const char *s)
+{
+    char *e;
+    u64 n, f[64];
+    int cnt = 0, i, j;
+    const char *p = s;
+    while (isspace((unsigned char)*p)) p++;
+    if (*p == '+') p++;
+    if (!isdigit((unsigned char)*p)) { say("'%s' is not a valid positive integer", s); return 1; }
+    for (n = 0, e = (char *)p; isdigit((unsigned char)*e); e++) {
+        if (n > (~0ULL - (*e - '0')) / 10) { say("'%s' is too large for rifle's factor", s); return 1; }
+        n = n * 10 + (*e - '0');
+    }
+    if (*e) { say("'%s' is not a valid positive integer", s); return 1; }
+    printf("%llu:", n);
+    if (n > 1) {
+        u64 q;
+        for (q = 2; q < 1000 && q * q <= n; q++) while (n % q == 0) { f[cnt++] = q; n /= q; }
+        factor_into(n, f, &cnt);
+    }
+    for (i = 0; i < cnt; i++) for (j = i + 1; j < cnt; j++) if (f[j] < f[i]) { u64 t = f[i]; f[i] = f[j]; f[j] = t; }
+    for (i = 0; i < cnt; i++) printf(" %llu", f[i]);
+    putchar('\n');
+    return 0;
+}
+
+static int t_factor(int argc, char **argv)
+{
+    int i, bad = 0;
+    opts_reset();
+    while (getopts(argc, argv, "", NULL)) {}
+    if (nops) { for (i = 0; i < nops; i++) bad |= factor_one(ops[i]); }
+    else {
+        char tok[64];
+        int c, k = 0;
+        while ((c = getchar()) != EOF) {
+            if (isspace(c)) { if (k) { tok[k] = 0; bad |= factor_one(tok); k = 0; } }
+            else if (k < 63) tok[k++] = c;
+        }
+        if (k) { tok[k] = 0; bad |= factor_one(tok); }
+    }
+    return finish_stdout() ? 1 : bad;
+}
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
 
 static const struct applet applets[] = {
+    { "[", t_test, "EXPRESSION ]", "Check file types and compare values." },
+    { "base32", t_base, "[OPTION]... [FILE]", "Base32 encode or decode FILE." },
+    { "base64", t_base, "[OPTION]... [FILE]", "Base64 encode or decode FILE." },
+    { "chroot", t_chroot, "[OPTION] NEWROOT [COMMAND [ARG]...]", "Run COMMAND with root directory set to NEWROOT." },
+    { "cksum", t_cksum, "[OPTION]... [FILE]...", "Print CRC checksum and byte counts of each FILE." },
+    { "date", t_date, "[OPTION]... [+FORMAT]", "Print the system date and time." },
+    { "dd", t_dd, "[OPERAND]...", "Copy a file, converting and formatting according to the operands." },
+    { "df", t_df, "[OPTION]... [FILE]...", "Show information about the file system on which each FILE resides." },
+    { "du", t_du, "[OPTION]... [FILE]...", "Summarize device usage of the set of FILEs, recursively for directories." },
+    { "expand", t_expand, "[OPTION]... [FILE]...", "Convert tabs in each FILE to spaces." },
+    { "expr", t_expr, "EXPRESSION", "Print the value of EXPRESSION to standard output." },
+    { "factor", t_factor, "[NUMBER]...", "Print the prime factors of each NUMBER." },
+    { "groups", t_id, "[OPTION]... [USERNAME]...", "Print the groups a user is in." },
+    { "id", t_id, "[OPTION]... [USER]", "Print user and group information for the specified USER, or for the current user." },
+    { "install", t_install, "[OPTION]... SOURCE... DIRECTORY", "Copy files and set attributes." },
+    { "join", t_join, "[OPTION]... FILE1 FILE2", "For each pair of input lines with identical join fields, write a line to standard output." },
+    { "ls", t_ls, "[OPTION]... [FILE]...", "List information about the FILEs (the current directory by default)." },
+    { "md5sum", t_digest, "[OPTION]... [FILE]...", "Print or check MD5 (128-bit) checksums." },
+    { "nice", t_nice, "[OPTION] [COMMAND [ARG]...]", "Run COMMAND with an adjusted niceness." },
+    { "nohup", t_nohup, "COMMAND [ARG]...", "Run COMMAND, ignoring hangup signals." },
+    { "od", t_od, "[OPTION]... [FILE]...", "Write an unambiguous representation, octal bytes by default, of FILE to standard output." },
+    { "sha1sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA1 (160-bit) checksums." },
+    { "sha224sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA224 (224-bit) checksums." },
+    { "sha256sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA256 (256-bit) checksums." },
+    { "sha384sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA384 (384-bit) checksums." },
+    { "sha512sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA512 (512-bit) checksums." },
+    { "shuf", t_shuf, "[OPTION]... [FILE]", "Write a random permutation of the input lines to standard output." },
+    { "split", t_split, "[OPTION]... [FILE [PREFIX]]", "Output pieces of FILE to PREFIXaa, PREFIXab, ..." },
+    { "stat", t_stat, "[OPTION]... FILE...", "Display file or file system status." },
+    { "sum", t_cksum, "[OPTION]... [FILE]...", "Print checksum and block counts for each FILE." },
+    { "test", t_test, "EXPRESSION", "Check file types and compare values." },
+    { "timeout", t_timeout, "[OPTION] DURATION COMMAND [ARG]...", "Start COMMAND, and kill it if still running after DURATION." },
+    { "truncate", t_truncate, "OPTION... FILE...", "Shrink or extend the size of each FILE to the specified size." },
+    { "tsort", t_tsort, "[OPTION] [FILE]", "Write totally ordered list consistent with the partial ordering in FILE." },
+    { "unexpand", t_expand, "[OPTION]... [FILE]...", "Convert spaces in each FILE to tabs." },
     { "arch", t_uname, "[OPTION]...", "Print the machine hardware name." },
     { "basename", t_basename, "NAME [SUFFIX] | OPTION... NAME...", "Print NAME without any leading directory components, and SUFFIX if it ends the name." },
     { "cat", t_cat, "[OPTION]... [FILE]...", "Concatenate FILE(s) to standard output." },
@@ -3789,6 +7091,7 @@ static const struct applet applets[] = {
     { "nl", t_nl, "[OPTION]... [FILE]", "Number the lines of FILE." },
     { "nproc", t_nproc, "[OPTION]...", "Print the number of processing units available." },
     { "paste", t_paste, "[OPTION]... [FILE]...", "Merge lines of files side by side." },
+    { "printf", t_printf, "FORMAT [ARGUMENT]...", "Print ARGUMENT(s) according to FORMAT." },
     { "printenv", t_printenv, "[OPTION]... [VARIABLE]...", "Print the values of the given environment VARIABLEs, or all of them." },
     { "pwd", t_pwd, "[OPTION]...", "Print the name of the current working directory." },
     { "readlink", t_readlink, "[OPTION]... FILE...", "Print the value of a symbolic link, or a file's canonical name." },
