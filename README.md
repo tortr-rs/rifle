@@ -15,11 +15,14 @@ You type `cat`, not `rifle cat`.
 
 It sorts and compares by bytes, always. No locales.
 
+grep has its own regex matcher (BRE and ERE, backtracking, longest match from the leftmost start). The grep, sed, find
+and xargs cases are compared against GNU grep 3.12, sed 4.10 and findutils 4.11, the rest against GNU coreutils.
+
 What's in so far
 ----------------
 
-[ arch base32 base64 basename cat chgrp chmod chown chroot cksum comm cp cut date dd df dirname du echo env
-expand expr factor false fold groups head hostid hostname id install join link ln logname ls md5sum mkdir
+[ arch base32 base64 basename cat chgrp chmod chown chroot cksum comm cp cut date dd df dirname du echo egrep env
+expand expr factor false fgrep fold grep groups head hostid hostname id install join link ln logname ls md5sum mkdir
 mkfifo mknod mktemp mv nice nl nohup nproc od paste printenv printf pwd readlink realpath rm rmdir seq
 sha1sum sha224sum sha256sum sha384sum sha512sum shuf sleep sort split stat sum sync tac tail tee test
 timeout touch tr true truncate tsort tty uname unexpand uniq unlink wc whoami yes

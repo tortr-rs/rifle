@@ -846,3 +846,258 @@ $X factor abc; echo $?
 $X factor -5; echo $?
 echo 30 | $X factor
 $X factor 0
+# grep
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep apple f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -n an f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -v apple f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -c apple f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -vc apple f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -i APPLE f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -y APPLE f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -o 'an' f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -on 'a.' f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -ob 'an' f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -x apple f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -w pie f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -w app f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -e cherry -e banana f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; $X grep -e cherry -e banana -n f
+printf 'apple\nbanana\ncherry\napple pie\n' > f; printf 'cherry\npie\n' > p; $X grep -f p f
+printf 'apple\nbanana\n' > f; : > p; $X grep -f p f
+printf 'apple\nbanana\n' > f; : > p; $X grep -vf p f
+printf 'apple\nbanana\n' > f; $X grep -e '' -c f
+printf 'apple\nbanana\n' > f; $X grep '' f
+printf 'apple\nbanana\n' > f; $X grep 'a
+b' f
+printf 'apple\nbanana\n' > f; $X grep -m1 a f
+printf 'apple\nbanana\n' > f; $X grep -m0 a f
+printf 'apple\nbanana\napple\n' > f; $X grep -c -m2 a f
+printf 'apple\nbanana\n' > f; $X grep -q apple f
+printf 'apple\nbanana\n' > f; $X grep -q zzz f
+printf 'apple\nbanana\n' > f; $X grep -q apple nope f
+printf 'apple\nbanana\n' > f; $X grep apple nope f
+printf 'apple\nbanana\n' > f; $X grep -s apple nope f
+printf 'apple\nbanana\n' > f; $X grep -s apple nope
+printf 'apple\nbanana\n' > f; $X grep zzz f
+printf 'apple\nbanana\n' > f; $X grep
+printf 'apple\nbanana\n' > f; $X grep --bogus x f
+printf 'apple\nbanana\n' > f; $X grep -E 'a(' f
+printf 'apple\nbanana\n' > f; $X grep 'a\(' f
+printf 'apple\nbanana\n' > f; $X grep '[a' f
+printf 'apple\nbanana\n' > f; $X grep '[[:foo:]]' f
+printf 'apple\nbanana\n' > f; $X grep '[:alpha:]' f
+printf 'apple\nbanana\n' > f; $X grep 'a\{1' f
+printf 'apple\nbanana\n' > f; $X grep '\(a\)\2' f
+printf 'apple\nbanana\n' > f; $X grep 'a\' f
+printf 'apple\nbanana\n' > f; $X grep '[z-a]' f
+printf 'apple\nbanana\n' > f; cp f g; $X grep a f g
+printf 'apple\nbanana\n' > f; cp f g; $X grep -h a f g
+printf 'apple\nbanana\n' > f; cp f g; $X grep -H a f
+printf 'apple\nbanana\n' > f; cp f g; $X grep -c a f g
+printf 'apple\nbanana\n' > f; cp f g; $X grep -l apple f g nope
+printf 'apple\nbanana\n' > f; printf 'x\n' > g; $X grep -l a f g
+printf 'apple\nbanana\n' > f; printf 'x\n' > g; $X grep -L a f g
+printf 'apple\nbanana\n' > f; printf 'x\n' > g; $X grep -lZ a f g | tr '\0' '@'
+printf 'apple\nbanana\n' > f; printf 'x\n' > g; $X grep -cZ a f g | tr '\0' '@'
+printf 'apple\nbanana\n' > f; printf 'x\n' > g; $X grep -nHZ a f | tr '\0' '@'
+printf 'apple\nbanana' > f; $X grep an f
+printf 'apple\nbanana' > f; $X grep -c '' f
+printf 'apple\nbanana\n' > f; $X grep -n a < f
+printf 'apple\nbanana\n' > f; $X grep -H a < f
+printf 'apple\nbanana\n' > f; $X grep -H a - < f
+printf 'apple\nbanana\n' > f; $X grep --label=in -H a < f
+printf 'apple\nbanana\n' > f; $X grep --label=in -c a - f < f
+printf 'apple\nbanana\n' > f; cat f | $X grep -c a
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -A1 c f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -B1 c f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -C1 -n c f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -2 d f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -n -C1 -e b -e g f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -n -A1 -e b -e d f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -n -B2 -e c -e d f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -A0 -e b -e g f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -A1 -m1 -e b -e c f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -vn -A1 '[a-f]' f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; cp f g; $X grep -A1 -e a -e h f g
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -oA1 -e b -e g f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -A x b f
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f; $X grep -vc -e a -e b f
+printf 'foo.bar\nfooXbar\n' > f; $X grep 'foo.bar' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -F 'foo.bar' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -Fx 'foo.bar' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -Fi 'FOO.BAR' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -Fw 'foo' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -F -e 'foo.' -e Xb f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -F 'a
+X' f
+printf 'foo.bar\nfooXbar\n' > f; $X fgrep 'o.b' f
+printf 'foo.bar\nfooXbar\n' > f; $X egrep 'o.b|X' f
+printf 'foo.bar\nfooXbar\n' > f; $X grep -E 'o\.b|X' -o f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '^(ab)+$' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a+b' -o f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a?b' -o f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a{2}' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a{1,}b' -c f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a{,1}b' -o f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '(ab){2}' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep 'a\{2\}' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep 'a\+b' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep 'a\?b' -o f
+printf 'ab\naab\nb\nabab\n' > f; $X grep 'ab\|^b' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a|b' -c f
+printf 'ab\naab\nb\nabab\n' > f; $X grep '\(ab\)\1' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '(a)(b)\2' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '(a|b)\1' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep '^a*b$' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '^(a|b)*$' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '(a*)*b' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '(a*)+c' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -oE '(a|ab)(b|)' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -oE 'a*|b' f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '' -c f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E 'a||b' -c f
+printf 'ab\naab\nb\nabab\n' > f; $X grep -E '()' -c f
+printf 'a*b\n*b\nab\n' > f; $X grep '*b' f
+printf 'a*b\n*b\nab\n' > f; $X grep '^*b' f
+printf 'a*b\n*b\nab\n' > f; $X grep '\(*b\)' f
+printf 'a*b\n*b\nab\n' > f; $X grep -E '*b' -o f
+printf 'a*b\n*b\nab\n' > f; $X grep -E 'a\*b' f
+printf 'a*b\n*b\nab\n' > f; $X grep 'a\*b' f
+printf 'a*b\n*b\nab\n' > f; $X grep -E '+b' -o f
+printf 'a^b\na$b\n$b\n' > f; $X grep 'a^b' f
+printf 'a^b\na$b\n$b\n' > f; $X grep 'a$b' f
+printf 'a^b\na$b\n$b\n' > f; $X grep -E 'a\^b' f
+printf 'a^b\na$b\n$b\n' > f; $X grep -E 'a$b' f
+printf 'a^b\na$b\n$b\n' > f; $X grep '^\$b' f
+printf 'a^b\na$b\n$b\n' > f; $X grep 'b$' -c f
+printf 'a^b\na$b\n$b\n' > f; $X grep '\(a$\)\|b' -c f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a{' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a{1' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a{1}' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep 'a{1}' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a)' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E '\(a' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep '(a' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a{2,1}' f
+printf 'a{b\na{1}\na)\n(a\n' > f; $X grep -E 'a{99999}' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -i 'the' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -iw 'the' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep '\bthe\b' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -i '\<the' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -i 'the\>' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -i 'the\B' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -io '\w*e\w*' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -o '\W\w' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -o '\s\S' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -o '[[:upper:]]\+' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -io '[[:upper:]]\+' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -o '[^[:space:]]*o[^[:space:]]*' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -o '[a-c]*' f
+printf 'The quick fox\nthe slow dog\nTHEFT\nbreathe\n' > f; $X grep -c '[[:alpha:][:digit:]]' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[]]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[^]]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[a-]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[\]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a\\b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[[.-.]]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[[=-=]]b' f
+printf 'a]b\na-b\na\\b\n' > f; $X grep 'a[--/]b' f
+printf 'one\ntwo\nthree\n' > f; $X grep -e one -e two -o f
+printf 'one\ntwo\nthree\n' > f; $X grep -ow 'o.e\|t..' f
+printf 'one\ntwo\nthree\n' > f; $X grep -e t -v f
+printf 'one\ntwo\nthree\n' > f; $X grep -ov t f
+printf 'one\ntwo\nthree\n' > f; $X grep -n '' f
+printf 'one\ntwo\nthree\n' > f; $X grep -nb 'e' f
+printf 'one\ntwo\nthree\n' > f; $X grep -o 'e*' f
+printf 'one\ntwo\nthree\n' > f; $X grep -c 'e*' f
+printf 'one\ntwo\nthree\n' > f; $X grep -x 'one\|two' f
+printf 'one\ntwo\nthree\n' > f; $X grep -xE 'on|one|tw' f
+printf 'one\ntwo\nthree\n' > f; $X grep -wE 'o|on|one' -o f
+printf 'foo\n\nbar\n' > f; $X grep -c '^$' f
+printf 'foo\n\nbar\n' > f; $X grep -n '^' f
+printf 'foo\n\nbar\n' > f; $X grep -x '' f
+printf 'foo\n\nbar\n' > f; $X grep -w '' f
+printf 'foo\n\nbar\n' > f; $X grep -vn . f
+printf 'x\0y\nfoo\n' > f; $X grep foo f
+printf 'x\0y\nfoo\n' > f; $X grep -c foo f
+printf 'x\0y\nfoo\n' > f; $X grep -a foo f
+printf 'x\0y\nfoo\n' > f; $X grep -I foo f
+printf 'x\0y\nfoo\n' > f; $X grep -l foo f
+printf 'x\0y\nfoo\n' > f; $X grep --binary-files=text -n foo f
+printf 'x\0y\nfoo\n' > f; $X grep --binary-files=without-match foo f
+printf 'x\0y\nfoo\n' > f; $X grep -q foo f
+printf 'x\0y\nfoo\n' > f; $X grep -v zzz f
+printf '\200\300x\nA\377B\n' > f; $X grep -a x f
+printf '\200\300x\nA\377B\n' > f; $X grep -c . f
+printf '\200\300x\nA\377B\n' > f; $X grep -ao 'A.B' f
+mkdir d; $X grep a d
+mkdir d; $X grep -s a d
+mkdir d; $X grep -d skip a d
+mkdir d; echo a > d/x; $X grep -r a d
+mkdir d; echo a > d/x; $X grep -r a d/
+mkdir d; echo a > d/x; $X grep -r a d d
+mkdir d; echo a > d/x; $X grep -r a d/x
+mkdir d; echo a > d/x; $X grep -r a .
+mkdir d; echo a > d/x; $X grep -r a
+mkdir d; echo a > d/x; $X grep -rh a
+mkdir d; echo a > d/x; $X grep -rc a
+mkdir d; echo a > d/x; $X grep -rl a
+mkdir d; echo a > d/x; $X grep -rL a
+mkdir d; echo a > d/x; $X grep -d recurse a d
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y; echo b > d/z; $X grep -r a d | sort
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y; echo b > d/z; $X grep -rn . d | sort
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y.c; echo a > d/z.h; $X grep -r --include='*.c' a d | sort
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y.c; echo a > d/z.h; $X grep -r --exclude='*.c' a d | sort
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y.c; echo a > d/z.h; $X grep -r --exclude-dir=e a d | sort
+mkdir -p d/e/f; echo a > d/e/f/x; echo a > d/y.c; echo a > d/z.h; $X grep -r --include='*.c' --include='*.h' a d | sort
+mkdir -p d/e; echo a > d/e/x; ln -s e d/l; ln -s e/x d/m; $X grep -r a d | sort
+mkdir -p d/e; echo a > d/e/x; ln -s e d/l; ln -s e/x d/m; $X grep -R a d | sort
+mkdir -p d/e; echo a > d/e/x; ln -s e d/l; $X grep -r a d/l
+mkdir -p d/e; echo a > d/e/x; ln -s e d/l; $X grep -rl a d/l/x nope; echo $?
+echo a > f; echo a > g; $X grep -r a f g | sort
+echo a > f; $X grep -r a - < f
+echo a > f; $X grep -e a --regexp=b --file=/dev/null --count f
+echo a > f; $X grep --count --ignore-case --invert-match --line-number --with-filename A f
+echo a > f; $X grep --max-count=1 --only-matching --no-filename --null a f | od -c
+echo a > f; $X grep --colour=never a f
+echo a > f; $X grep --color a f
+echo a > f; $X grep --line-buffered a f
+echo a > f; $X grep --no-messages a nope
+echo a > f; $X grep --files-with-matches a f
+echo a > f; $X grep --files-without-match b f
+echo abc > f; $X grep --after-context=1 --before-context=1 b f
+echo abc > f; $X grep --context=1 b f
+echo abc > f; $X grep --fixed-strings --line-regexp abc f
+echo abc > f; $X grep --extended-regexp --word-regexp 'a|abc' f
+echo abc > f; $X grep --basic-regexp 'a\|abc' f
+echo abc > f; $X grep -EF 'a|b' f
+echo abc > f; $X grep -FE 'a|b' f
+echo abc > f; $X grep -FG 'a|b' f
+echo abc > f; $X grep -ci -e A -e B f
+echo abc > f; $X grep -e a -f /dev/null -c f
+echo abc > f; $X grep -hn b f f
+echo 'a.b' > f; $X grep -F -e . f
+echo 'a.b' > f; $X grep -F '' -c f
+echo 'a.b' > f; $X grep -F -x '' -c f
+echo 'a.b' > f; $X grep -Fo '.' f
+echo aaa > f; $X grep -o 'a' f
+echo aaa > f; $X grep -o 'a*' f
+echo aaa > f; $X grep -o 'a\{2\}' f
+echo aaa > f; $X grep -ob 'a\{2\}' f
+echo abcabc > f; $X grep -o 'b' f
+echo abcabc > f; $X grep -o '^a' f
+echo abcabc > f; $X grep -o 'c$' f
+echo abcabc > f; $X grep -ow 'abc' f
+echo 'abc abc' > f; $X grep -ow 'abc' f
+echo 'abc abcd' > f; $X grep -ow 'abc' f
+echo 'foo-bar foo_bar' > f; $X grep -ow 'foo' f
+echo 'foo-bar foo_bar' > f; $X grep -ow 'bar' f
+echo 'aXbxc' > f; $X grep -io 'x' f
+echo 'aXbxc' > f; $X grep -o '[x]' f
+echo 'aXbxc' > f; $X grep -io '[x]' f
+echo 'aXbxc' > f; $X grep -io '[^x]' f
+echo 'ABab' > f; $X grep -io '\(a\)\(b\)\1\2' f
+echo 'ABab' > f; $X grep -iE '(a)(b)\1\2' f
+echo 'ABab' > f; $X grep -iw 'abab' f
+echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac > f; $X grep -E '(a*)*b' f
+echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac > f; $X grep -cE '(a|aa)+$' f

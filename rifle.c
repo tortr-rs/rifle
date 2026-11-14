@@ -7023,6 +7023,857 @@ static int t_factor(int argc, char **argv)
     }
     return finish_stdout() ? 1 : bad;
 }
+/* ---- regex ----
+ * BRE and ERE read the way GNU reads them (\w \< \b \+ \| work in a BRE too), on bytes. a pattern becomes a node tree,
+ * the tree a short program, and a backtracking machine runs that, keeping the longest match from the leftmost start.
+ * grep and sed both use it */
+
+enum { R_CHAR, R_ANY, R_SET, R_SPLIT, R_JMP, R_SAVE, R_BOL, R_EOL, R_WB, R_NWB, R_WBEG, R_WEND, R_BEFORE, R_AFTER,
+       R_BREF, R_MARK, R_PROG, R_MATCH };
+enum { N_EMPTY, N_CHAR, N_ANY, N_SET, N_CAT, N_ALT, N_REP, N_GRP, N_ASSERT, N_BREF };
+
+struct rinst { int op, x, y, id; };
+struct rnode { int t, c, min, max; struct rnode *a, *b; };
+struct regex {
+    struct rinst *prog; int n, cap, ngrp, nslot, nsplit, nmark, backref, icase, first;
+    unsigned char (*sets)[32]; int nsets;
+};
+struct rparse { const char *p, *e; int ere, sed, depth, local; struct regex *re; };
+
+static int re_exit = 2;
+#define RE_DUP_MAX 32767
+
+static __attribute__((noreturn)) void re_die(const char *m) { die(re_exit, "%s", m); }
+
+static struct rnode *rn(int t, struct rnode *a, struct rnode *b)
+{
+    struct rnode *n = xmalloc(sizeof *n);
+    memset(n, 0, sizeof *n);
+    n->t = t; n->a = a; n->b = b;
+    return n;
+}
+static struct rnode *rn_cat(struct rnode *a, struct rnode *b) { return a ? rn(N_CAT, a, b) : b; }
+
+static struct regex *re_new(int icase)
+{
+    struct regex *re = xmalloc(sizeof *re);
+    memset(re, 0, sizeof *re);
+    re->icase = icase; re->first = -1;
+    return re;
+}
+
+static int re_newset(struct regex *re)
+{
+    re->sets = xrealloc(re->sets, (re->nsets + 1) * sizeof *re->sets);
+    memset(re->sets[re->nsets], 0, 32);
+    return re->nsets++;
+}
+#define SET_ADD(s, c) ((s)[(unsigned char)(c) >> 3] |= 1 << ((c) & 7))
+#define SET_HAS(s, c) ((s)[(unsigned char)(c) >> 3] >> ((c) & 7) & 1)
+
+static void set_fold(unsigned char *s)
+{
+    int c;
+    for (c = 'a'; c <= 'z'; c++) {
+        if (SET_HAS(s, c) || SET_HAS(s, c - 32)) { SET_ADD(s, c); SET_ADD(s, c - 32); }
+    }
+}
+
+static struct rnode *re_ch(struct rparse *ps, int c)
+{
+    struct rnode *n;
+    if (ps->re->icase && isalpha(c)) {
+        n = rn(N_SET, NULL, NULL);
+        n->c = re_newset(ps->re);
+        SET_ADD(ps->re->sets[n->c], c); SET_ADD(ps->re->sets[n->c], c ^ 32);
+        return n;
+    }
+    n = rn(N_CHAR, NULL, NULL);
+    n->c = c;
+    return n;
+}
+
+static int class_has(const char *name, size_t l, int c)
+{
+    static const char *names[] = { "alpha", "digit", "alnum", "upper", "lower", "space", "blank", "punct", "print", "graph", "cntrl", "xdigit" };
+    int k;
+    for (k = 0; k < 12; k++) if (strlen(names[k]) == l && !strncmp(names[k], name, l)) break;
+    switch (k) {
+    case 0: return isalpha(c);
+    case 1: return isdigit(c);
+    case 2: return isalnum(c);
+    case 3: return isupper(c);
+    case 4: return islower(c);
+    case 5: return isspace(c);
+    case 6: return c == ' ' || c == '\t';
+    case 7: return ispunct(c);
+    case 8: return c >= 32 && c < 127;
+    case 9: return c > 32 && c < 127;
+    case 10: return c < 32 || c == 127;
+    case 11: return isxdigit(c);
+    }
+    return -1;
+}
+
+static int class_name_ok(const char *name, size_t l) { return class_has(name, l, 'a') >= 0; }
+
+static void class_add(unsigned char *set, const char *name, size_t l)
+{
+    int c;
+    for (c = 0; c < 256; c++) if (class_has(name, l, c) > 0) SET_ADD(set, c);
+}
+
+static int re_bchar(struct rparse *ps, const char **pp)
+{
+    const char *p = *pp;
+    int c = (unsigned char)*p++;
+    if (c == '[' && p < ps->e && *p == '.') {
+        if (p + 3 >= ps->e || p[2] != '.' || p[3] != ']') re_die("Invalid collation character");
+        c = (unsigned char)p[1]; p += 4;
+    } else if (ps->sed && c == '\\' && p < ps->e && (*p == 'n' || *p == 't')) c = *p++ == 'n' ? '\n' : '\t';
+    *pp = p;
+    return c;
+}
+
+/* after the [ */
+static struct rnode *re_bracket(struct rparse *ps)
+{
+    struct regex *re = ps->re;
+    int idx = re_newset(re), neg = 0, first = 1, c, k;
+    const char *p = ps->p, *start;
+    if (p < ps->e && *p == '^') { neg = 1; p++; }
+    start = p;
+    for (;; first = 0) {
+        int lo;
+        if (p >= ps->e) re_die("Unmatched [, [^, [:, [., or [=");
+        if (*p == ']' && !first) { p++; break; }
+        if (*p == '[' && p + 1 < ps->e && (p[1] == ':' || p[1] == '=')) {
+            const char *q = p + 2;
+            while (q + 1 < ps->e && !(*q == p[1] && q[1] == ']')) q++;
+            if (q + 1 >= ps->e) re_die("Unmatched [, [^, [:, [., or [=");
+            if (p[1] == ':') {
+                if (!class_name_ok(p + 2, q - p - 2)) re_die("Invalid character class name");
+                class_add(re->sets[idx], p + 2, q - p - 2);
+            } else {
+                if (q - p != 3) re_die("Invalid collation character");
+                SET_ADD(re->sets[idx], p[2]);
+            }
+            p = q + 2;
+            continue;
+        }
+        lo = re_bchar(ps, &p);
+        if (p + 1 < ps->e && *p == '-' && p[1] != ']') {
+            int hi;
+            p++;
+            hi = re_bchar(ps, &p);
+            if (hi < lo) re_die("Invalid range end");
+            for (c = lo; c <= hi; c++) SET_ADD(re->sets[idx], c);
+        } else SET_ADD(re->sets[idx], lo);
+    }
+    if (p - start >= 3 && *start == ':' && p[-2] == ':') re_die("character class syntax is [[:space:]], not [:space:]");
+    ps->p = p;
+    if (re->icase) set_fold(re->sets[idx]);
+    if (neg) for (k = 0; k < 32; k++) re->sets[idx][k] = ~re->sets[idx][k];
+    {
+        struct rnode *n = rn(N_SET, NULL, NULL);
+        n->c = idx;
+        return n;
+    }
+}
+
+static struct rnode *re_alt(struct rparse *ps);
+
+static struct rnode *re_assert(int op)
+{
+    struct rnode *n = rn(N_ASSERT, NULL, NULL);
+    n->c = op;
+    return n;
+}
+
+static struct rnode *re_shorthand(struct rparse *ps, int c)
+{
+    struct rnode *n = rn(N_SET, NULL, NULL);
+    unsigned char *s;
+    int k;
+    n->c = re_newset(ps->re);
+    s = ps->re->sets[n->c];
+    for (k = 0; k < 256; k++) {
+        int w = isalnum(k) || k == '_', sp = isspace(k);
+        if (c == 'w' ? w : c == 'W' ? !w : c == 's' ? sp : !sp) SET_ADD(s, k);
+    }
+    return n;
+}
+
+/* the {m,n} after a brace. in an ERE a brace that doesn't make an interval is only a brace, in a BRE it is an error */
+static int re_interval(struct rparse *ps, int *mn, int *mx)
+{
+    const char *p = ps->p;
+    long a = -1, b = -1;
+    int comma = 0;
+    while (p < ps->e && isdigit((unsigned char)*p)) { a = (a < 0 ? 0 : a) * 10 + *p++ - '0'; if (a > RE_DUP_MAX + 1) a = RE_DUP_MAX + 1; }
+    if (p < ps->e && *p == ',') {
+        comma = 1; p++;
+        while (p < ps->e && isdigit((unsigned char)*p)) { b = (b < 0 ? 0 : b) * 10 + *p++ - '0'; if (b > RE_DUP_MAX + 1) b = RE_DUP_MAX + 1; }
+    }
+    if (ps->ere ? !(p < ps->e && *p == '}') : !(p + 1 < ps->e && p[0] == '\\' && p[1] == '}')) {
+        if (ps->ere) return 0;
+        re_die(p >= ps->e ? "Unmatched \\{" : "Invalid content of \\{\\}");
+    }
+    if (a < 0 && !comma) { if (ps->ere) return 0; re_die("Invalid content of \\{\\}"); }
+    p += ps->ere ? 1 : 2;
+    if (a < 0) a = 0;
+    if (!comma) b = a;
+    if (b >= 0 && a > b) re_die("Invalid content of \\{\\}");
+    if (a > RE_DUP_MAX || b > RE_DUP_MAX) re_die("Regular expression too big");
+    *mn = a; *mx = b;
+    ps->p = p;
+    return 1;
+}
+
+/* one atom, no repetition. *anchor says it was the ^ of a BRE, after which a * is still an ordinary character */
+static struct rnode *re_atom(struct rparse *ps, int start, int *anchor)
+{
+    const char *p = ps->p;
+    int c = (unsigned char)*p++, ere = ps->ere;
+    *anchor = 0;
+    if (c == '\\') {
+        if (p >= ps->e) re_die("Trailing backslash");
+        c = (unsigned char)*p++;
+        if (!ere && c == '(') goto group;
+        switch (c) {
+        case 'w': case 'W': case 's': case 'S': ps->p = p; return re_shorthand(ps, c);
+        case 'b': ps->p = p; return re_assert(R_WB);
+        case 'B': ps->p = p; return re_assert(R_NWB);
+        case '<': ps->p = p; return re_assert(R_WBEG);
+        case '>': ps->p = p; return re_assert(R_WEND);
+        case '`': ps->p = p; return re_assert(R_BOL);
+        case '\'': ps->p = p; return re_assert(R_EOL);
+        }
+        if (c >= '1' && c <= '9') {
+            struct rnode *n;
+            if (c - '0' > ps->local) re_die("Invalid back reference");
+            n = rn(N_BREF, NULL, NULL);
+            n->c = ps->re->ngrp - ps->local + c - '0';
+            ps->re->backref = 1;
+            ps->p = p;
+            return n;
+        }
+        if (ps->sed) {
+            int v = c == 'n' ? '\n' : c == 't' ? '\t' : c == 'f' ? '\f' : c == 'v' ? '\v' : c == 'a' ? 7 : c == 'r' ? '\r' : -1;
+            if (c == 'x' && p + 1 < ps->e && isxdigit((unsigned char)p[0]) && isxdigit((unsigned char)p[1])) {
+                v = (isdigit((unsigned char)p[0]) ? p[0] - '0' : (p[0] | 32) - 'a' + 10) * 16 + (isdigit((unsigned char)p[1]) ? p[1] - '0' : (p[1] | 32) - 'a' + 10);
+                p += 2;
+            }
+            if (v >= 0) c = v;
+        }
+        ps->p = p;
+        return re_ch(ps, c);
+    }
+    if (ere && c == '(') {
+    group:
+        {
+            struct rnode *g = rn(N_GRP, NULL, NULL);
+            g->c = ++ps->re->ngrp; ps->local++;
+            ps->p = p; ps->depth++;
+            g->a = re_alt(ps);
+            ps->depth--;
+            if (ps->ere ? !(ps->p < ps->e && *ps->p == ')') : !(ps->p + 1 < ps->e && ps->p[0] == '\\' && ps->p[1] == ')'))
+                re_die("Unmatched ( or \\(");
+            ps->p += ps->ere ? 1 : 2;
+            return g;
+        }
+    }
+    ps->p = p;
+    switch (c) {
+    case '.': return rn(N_ANY, NULL, NULL);
+    case '[': return re_bracket(ps);
+    case '^':
+        if (ere) return re_assert(R_BOL);
+        if (start) { *anchor = 1; return re_assert(R_BOL); }
+        break;
+    case '$':
+        if (ere || p >= ps->e || (p + 1 < ps->e && p[0] == '\\' && (p[1] == ')' || p[1] == '|'))) return re_assert(R_EOL);
+        break;
+    }
+    return re_ch(ps, c);
+}
+
+/* is there a repetition operator next? */
+static int re_op(struct rparse *ps, int *mn, int *mx)
+{
+    const char *p = ps->p;
+    int bs = 0;
+    if (p >= ps->e) return 0;
+    if (!ps->ere && *p == '\\') { if (p + 1 >= ps->e) return 0; bs = 1; p++; }
+    if (!bs && *p == '*') { *mn = 0; *mx = -1; ps->p = p + 1; return 1; }
+    if (bs == ps->ere) return 0;
+    if (*p == '+') { *mn = 1; *mx = -1; ps->p = p + 1; return 1; }
+    if (*p == '?') { *mn = 0; *mx = 1; ps->p = p + 1; return 1; }
+    if (*p == '{') { const char *save = ps->p; ps->p = p + 1; if (re_interval(ps, mn, mx)) return 1; ps->p = save; }
+    return 0;
+}
+
+static struct rnode *re_cat(struct rparse *ps)
+{
+    struct rnode *head = NULL;
+    int start = 1;
+    while (ps->p < ps->e) {
+        struct rnode *n;
+        int anchor, mn, mx;
+        if (ps->ere) {
+            if (*ps->p == '|' || (*ps->p == ')' && ps->depth)) break;
+        } else if (*ps->p == '\\' && ps->p + 1 < ps->e && (ps->p[1] == '|' || ps->p[1] == ')')) {
+            if (ps->p[1] == ')' && !ps->depth) re_die("Unmatched ) or \\)");
+            break;
+        }
+        if (start && ps->ere && re_op(ps, &mn, &mx)) continue;
+        n = re_atom(ps, start, &anchor);
+        start = anchor;
+        if (!anchor)
+            while (re_op(ps, &mn, &mx)) {
+                struct rnode *r = rn(N_REP, n, NULL);
+                r->min = mn; r->max = mx;
+                n = r;
+            }
+        head = head ? rn(N_CAT, head, n) : n;
+    }
+    return head ? head : rn(N_EMPTY, NULL, NULL);
+}
+
+static struct rnode *re_alt(struct rparse *ps)
+{
+    struct rnode *n = re_cat(ps);
+    while (ps->p < ps->e && (ps->ere ? *ps->p == '|' : (*ps->p == '\\' && ps->p + 1 < ps->e && ps->p[1] == '|'))) {
+        ps->p += ps->ere ? 1 : 2;
+        n = rn(N_ALT, n, re_cat(ps));
+    }
+    return n;
+}
+
+static struct rnode *re_parse(struct regex *re, const char *pat, size_t len, int ere, int sed)
+{
+    struct rparse ps = { pat, pat + len, ere, sed, 0, 0, re };
+    return re_alt(&ps);
+}
+
+static struct rnode *re_literal(struct regex *re, const char *pat, size_t len)
+{
+    struct rparse ps = { pat, pat + len, 0, 0, 0, 0, re };
+    struct rnode *n = NULL;
+    size_t i;
+    for (i = 0; i < len; i++) n = rn_cat(n, re_ch(&ps, (unsigned char)pat[i]));
+    return n ? n : rn(N_EMPTY, NULL, NULL);
+}
+
+static int re_put(struct regex *re, int op, int x, int y)
+{
+    if (re->n == re->cap) {
+        if (re->cap > (1 << 22)) re_die("Regular expression too big");
+        re->cap = re->cap ? re->cap * 2 : 64;
+        re->prog = xrealloc(re->prog, re->cap * sizeof *re->prog);
+    }
+    re->prog[re->n].op = op; re->prog[re->n].x = x; re->prog[re->n].y = y; re->prog[re->n].id = 0;
+    return re->n++;
+}
+static int re_split(struct regex *re)
+{
+    int j = re_put(re, R_SPLIT, 0, 0);
+    re->prog[j].x = re->n; re->prog[j].id = re->nsplit++;
+    return j;
+}
+
+static int re_nullable(const struct rnode *n)
+{
+    switch (n->t) {
+    case N_CHAR: case N_ANY: case N_SET: return 0;
+    case N_CAT: return re_nullable(n->a) && re_nullable(n->b);
+    case N_ALT: return re_nullable(n->a) || re_nullable(n->b);
+    case N_REP: return !n->min || re_nullable(n->a);
+    case N_GRP: return re_nullable(n->a);
+    }
+    return 1;
+}
+
+static void re_emit(struct regex *re, const struct rnode *n)
+{
+    int i, j, k;
+    switch (n->t) {
+    case N_CHAR: re_put(re, R_CHAR, n->c, 0); break;
+    case N_ANY: re_put(re, R_ANY, 0, 0); break;
+    case N_SET: re_put(re, R_SET, n->c, 0); break;
+    case N_ASSERT: re_put(re, n->c, 0, 0); break;
+    case N_BREF: re_put(re, R_BREF, n->c, 0); break;
+    case N_CAT: re_emit(re, n->a); re_emit(re, n->b); break;
+    case N_GRP:
+        re_put(re, R_SAVE, 2 * n->c, 0);
+        re_emit(re, n->a);
+        re_put(re, R_SAVE, 2 * n->c + 1, 0);
+        break;
+    case N_ALT:
+        j = re_split(re);
+        re_emit(re, n->a);
+        k = re_put(re, R_JMP, 0, 0);
+        re->prog[j].y = re->n;
+        re_emit(re, n->b);
+        re->prog[k].x = re->n;
+        break;
+    case N_REP:
+        for (i = 0; i < n->min; i++) re_emit(re, n->a);
+        if (n->max < 0) {
+            int mk = re_nullable(n->a) ? re->nmark++ : -1;
+            j = re_split(re);
+            if (mk >= 0) re_put(re, R_MARK, mk, 0);
+            re_emit(re, n->a);
+            if (mk >= 0) re_put(re, R_PROG, mk, 0);
+            re_put(re, R_JMP, j, 0);
+            re->prog[j].y = re->n;
+        } else if (n->max > n->min) {
+            int *js = xmalloc((n->max - n->min) * sizeof *js);
+            for (i = 0; i < n->max - n->min; i++) { js[i] = re_split(re); re_emit(re, n->a); }
+            for (i = 0; i < n->max - n->min; i++) re->prog[js[i]].y = re->n;
+            free(js);
+        }
+        break;
+    }
+}
+
+/* the program for a tree. the group slots come first, then one slot for each loop that could match nothing */
+static void re_finish(struct regex *re, struct rnode *n)
+{
+    int i;
+    re_emit(re, n);
+    re_put(re, R_MATCH, 0, 0);
+    for (i = 0; i < re->n; i++) if (re->prog[i].op == R_MARK || re->prog[i].op == R_PROG) re->prog[i].x += 2 * (re->ngrp + 1);
+    re->nslot = 2 * (re->ngrp + 1) + re->nmark;
+    if (re->prog[0].op == R_CHAR) re->first = re->prog[0].x;
+}
+
+static int word_at(const char *s, size_t len, long i) { return i >= 0 && (size_t)i < len && (isalnum((unsigned char)s[i]) || s[i] == '_'); }
+
+struct rframe { int pc, slot; long v; };
+
+/* the leftmost match at or after start. caps gets 2 * (ngrp + 1) offsets, -1 for a group that didn't take part.
+ * longest 0 stops at the first way to match, which is all a yes-or-no question needs */
+static int re_exec(const struct regex *re, const char *s, size_t len, size_t start, int longest, long *caps)
+{
+    static struct rframe *stk;
+    static size_t stkcap;
+    static long *work;
+    static size_t workcap;
+    static uint32_t *seen, gen;
+    static size_t seencap;
+    size_t st, stride = len + 1, need = (size_t)re->nsplit * stride;
+    int memo = !re->backref && need && need <= (1u << 26), ncap = 2 * (re->ngrp + 1);
+    const struct rinst *prog = re->prog;
+    if (workcap < (size_t)re->nslot) { workcap = re->nslot; work = xrealloc(work, workcap * sizeof *work); }
+    if (memo) {
+        if (seencap < need) { seencap = need; seen = xrealloc(seen, seencap * sizeof *seen); memset(seen, 0, seencap * sizeof *seen); gen = 0; }
+        if (++gen == 0) { memset(seen, 0, seencap * sizeof *seen); gen = 1; }
+    }
+    for (st = start; st <= len; st++) {
+        long best = -1;
+        size_t sp = 0;
+        int pc = 0, i;
+        long pos = st;
+        if (re->first >= 0) {
+            const char *q = memchr(s + st, re->first, len - st);
+            if (!q) return 0;
+            st = pos = q - s;
+        }
+        for (i = 0; i < re->nslot; i++) work[i] = -1;
+        for (;;) {
+            const struct rinst *in = &prog[pc];
+            switch (in->op) {
+            case R_CHAR: if ((size_t)pos < len && (unsigned char)s[pos] == in->x) { pos++; pc++; continue; } goto fail;
+            case R_ANY: if ((size_t)pos < len) { pos++; pc++; continue; } goto fail;
+            case R_SET: if ((size_t)pos < len && SET_HAS(re->sets[in->x], s[pos])) { pos++; pc++; continue; } goto fail;
+            case R_SPLIT:
+                if (memo) {
+                    uint32_t *m = &seen[(size_t)in->id * stride + pos];
+                    if (*m == gen) goto fail;
+                    *m = gen;
+                }
+                if (sp == stkcap) { stkcap = stkcap ? stkcap * 2 : 256; stk = xrealloc(stk, stkcap * sizeof *stk); }
+                stk[sp].pc = in->y; stk[sp].v = pos; sp++;
+                pc = in->x;
+                continue;
+            case R_JMP: pc = in->x; continue;
+            case R_SAVE: case R_MARK:
+                if (sp == stkcap) { stkcap = stkcap ? stkcap * 2 : 256; stk = xrealloc(stk, stkcap * sizeof *stk); }
+                stk[sp].slot = in->x; stk[sp].pc = -1; stk[sp].v = work[in->x]; sp++;
+                work[in->x] = pos; pc++;
+                continue;
+            case R_PROG: if (work[in->x] == pos) goto fail; pc++; continue;
+            case R_BOL: if (pos == 0) { pc++; continue; } goto fail;
+            case R_EOL: if ((size_t)pos == len) { pc++; continue; } goto fail;
+            case R_WB: if (word_at(s, len, pos - 1) != word_at(s, len, pos)) { pc++; continue; } goto fail;
+            case R_NWB: if (word_at(s, len, pos - 1) == word_at(s, len, pos)) { pc++; continue; } goto fail;
+            case R_WBEG: if (!word_at(s, len, pos - 1) && word_at(s, len, pos)) { pc++; continue; } goto fail;
+            case R_WEND: if (word_at(s, len, pos - 1) && !word_at(s, len, pos)) { pc++; continue; } goto fail;
+            case R_BEFORE: if (!word_at(s, len, pos - 1)) { pc++; continue; } goto fail;
+            case R_AFTER: if (!word_at(s, len, pos)) { pc++; continue; } goto fail;
+            case R_BREF: {
+                long a = work[2 * in->x], b = work[2 * in->x + 1], n;
+                if (a < 0 || b < 0) goto fail;
+                n = b - a;
+                if ((size_t)(pos + n) > len || (re->icase ? strncasecmp(s + a, s + pos, n) : memcmp(s + a, s + pos, n))) goto fail;
+                pos += n; pc++;
+                continue;
+            }
+            case R_MATCH:
+                if (pos > best) {
+                    best = pos;
+                    if (caps) { memcpy(caps, work, ncap * sizeof *caps); caps[0] = st; caps[1] = pos; }
+                }
+                if (!longest || (size_t)pos == len) return 1;
+                goto fail;
+            }
+        fail:
+            for (;;) {
+                if (!sp) goto done;
+                sp--;
+                if (stk[sp].pc < 0) work[stk[sp].slot] = stk[sp].v;
+                else { pc = stk[sp].pc; pos = stk[sp].v; break; }
+            }
+        }
+    done:
+        if (best >= 0) return 1;
+    }
+    return 0;
+}
+
+/* ---- reading lines ----
+ * a chunk at a time, so grep and sed can start answering while a pipe is still filling. a line is good until the next call */
+
+struct lr { int fd, eof, err, binary; char *buf; size_t cap, pos, end, scan; };
+
+static void lr_init(struct lr *r, int fd) { memset(r, 0, sizeof *r); r->fd = fd; }
+
+static int lr_fill(struct lr *r)
+{
+    ssize_t n;
+    if (r->pos) {
+        memmove(r->buf, r->buf + r->pos, r->end - r->pos);
+        r->scan -= r->pos; r->end -= r->pos; r->pos = 0;
+    }
+    if (r->end == r->cap) { r->cap = r->cap ? r->cap * 2 : 65536; r->buf = xrealloc(r->buf, r->cap); }
+    do n = read(r->fd, r->buf + r->end, r->cap - r->end); while (n < 0 && errno == EINTR);
+    if (n <= 0) { if (n < 0) r->err = errno; r->eof = 1; return 0; }
+    if (memchr(r->buf + r->end, 0, n)) r->binary = 1;
+    r->end += n;
+    return 1;
+}
+
+static int lr_line(struct lr *r, char **s, size_t *len, int *nl)
+{
+    for (;;) {
+        char *e = r->end > r->scan ? memchr(r->buf + r->scan, '\n', r->end - r->scan) : NULL;
+        if (e) {
+            *s = r->buf + r->pos; *len = e - *s; *nl = 1;
+            r->pos = r->scan = e - r->buf + 1;
+            return 1;
+        }
+        r->scan = r->end;
+        if (r->eof) {
+            if (r->pos == r->end) return 0;
+            *s = r->buf + r->pos; *len = r->end - r->pos; *nl = 0;
+            r->pos = r->end;
+            return 1;
+        }
+        lr_fill(r);
+    }
+}
+
+/* is there more after the line just read? sed needs it for $. a line from before is gone once this reads */
+static int lr_more(struct lr *r) { return r->pos < r->end || (!r->eof && lr_fill(r)); }
+
+/* ---- grep ---- */
+
+static struct regex *g_re;
+static int g_invert, g_count, g_list, g_nolist, g_num, g_name, g_only, g_quiet, g_nomsg, g_byte, g_null, g_text, g_recurse,
+    g_dirs, g_ctx, g_lbuf, g_any, g_err, g_printed;
+static long g_after, g_before, g_max = -1, *g_caps;
+static char **g_inc, **g_exc, **g_excd;
+static int g_ninc, g_nexc, g_nexcd;
+static const char *g_label = "(standard input)";
+static const char *gf_name;
+static int gf_show;
+static long gf_last;
+
+static void g_prefix(long no, long off, int sep)
+{
+    if (gf_show) { fputs(gf_name, stdout); putchar(g_null ? 0 : sep); }
+    if (g_num) printf("%ld%c", no, sep);
+    if (g_byte) printf("%ld%c", off, sep);
+}
+
+static void g_line(long no, long off, const char *s, size_t len, int sep)
+{
+    if (g_ctx && g_printed && !(gf_last >= 0 && no == gf_last + 1)) puts("--");
+    g_printed = 1; gf_last = no;
+    if (g_only) {
+        size_t st = 0;
+        if (sep != ':' || g_invert) return;
+        while (st <= len && re_exec(g_re, s, len, st, 1, g_caps)) {
+            if (g_caps[1] == g_caps[0]) { st = g_caps[1] + 1; continue; }
+            g_prefix(no, off + g_caps[0], sep);
+            fwrite(s + g_caps[0], 1, g_caps[1] - g_caps[0], stdout);
+            putchar('\n');
+            st = g_caps[1];
+        }
+    } else {
+        g_prefix(no, off, sep);
+        fwrite(s, 1, len, stdout);
+        putchar('\n');
+    }
+    if (g_lbuf) fflush(stdout);
+}
+
+struct held { char *s; size_t len, cap; long no, off; };
+
+static long grep_fd(int fd)
+{
+    struct lr r;
+    struct held *ring = NULL;
+    char *s;
+    size_t len;
+    int nl, done = 0;
+    long no = 0, off = 0, count = 0, left = 0, j;
+    lr_init(&r, fd);
+    gf_last = -1;
+    if (g_before) { ring = xmalloc(g_before * sizeof *ring); memset(ring, 0, g_before * sizeof *ring); }
+    while (lr_line(&r, &s, &len, &nl)) {
+        int sel;
+        no++;
+        if (r.binary && g_text == 2) { count = 0; break; }
+        if (done) {
+            if (left-- <= 0) break;
+            g_line(no, off, s, len, '-');
+        } else if ((sel = re_exec(g_re, s, len, 0, 0, NULL) != g_invert)) {
+            count++; g_any = 1;
+            if (g_quiet) exit(0);
+            if (g_list || g_nolist) break;
+            if (!g_count) {
+                if (r.binary && !g_text) { say("%s: binary file matches", gf_name); break; }
+                for (j = no - g_before; j < no; j++)
+                    if (j >= 1 && j > gf_last && ring[j % g_before].no == j) g_line(j, ring[j % g_before].off, ring[j % g_before].s, ring[j % g_before].len, '-');
+                g_line(no, off, s, len, ':');
+                left = g_after;
+            }
+            if (g_max >= 0 && count >= g_max) { done = 1; if (g_count || !left) break; }
+        } else if (!g_count && !g_list && !g_nolist) {
+            if (left > 0) { left--; g_line(no, off, s, len, '-'); }
+            else if (g_before) {
+                struct held *h = &ring[no % g_before];
+                if (h->cap < len) { h->cap = len + 64; h->s = xrealloc(h->s, h->cap); }
+                memcpy(h->s, s, len); h->len = len; h->no = no; h->off = off;
+            }
+        }
+        off += len + nl;
+    }
+    if (r.err) { if (!g_nomsg) { errno = r.err; perr("%s", gf_name); } g_err = 1; }
+    free(r.buf);
+    if (ring) { for (j = 0; j < g_before; j++) free(ring[j].s); free(ring); }
+    return count;
+}
+
+static int name_listed(char **v, int n, const char *path)
+{
+    const char *b = base_of(path);
+    int i;
+    for (i = 0; i < n; i++) if (glob_match(v[i], b) || glob_match(v[i], path)) return 1;
+    return 0;
+}
+
+static int cmp_names(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static const char g_dot[] = ".";
+
+static void grep_path(const char *path, int top)
+{
+    struct stat st;
+    int fd;
+    long count;
+    const char *shown = path;
+    if (top && !strcmp(path, "-")) { fd = 0; shown = g_label; goto go; }
+    if (g_recurse || g_dirs) {
+        if ((top || g_recurse == 2 ? stat(path, &st) : lstat(path, &st)) < 0) {
+            if (!g_nomsg) perr("%s", path);
+            g_err = 1;
+            return;
+        }
+        if (S_ISLNK(st.st_mode)) return;
+        if (S_ISDIR(st.st_mode)) {
+            if (g_dirs == 1 || (g_nexcd && strcmp(path, ".") && name_listed(g_excd, g_nexcd, path))) return;
+            if (g_recurse) {
+                DIR *d = opendir(path);
+                struct dirent *e;
+                char **v = NULL;
+                int n = 0, cap = 0, i;
+                if (!d) { if (!g_nomsg) perr("%s", path); g_err = 1; return; }
+                while ((e = readdir(d))) {
+                    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                    if (n == cap) { cap = cap ? cap * 2 : 32; v = xrealloc(v, cap * sizeof *v); }
+                    v[n++] = xstrdup(e->d_name);
+                }
+                closedir(d);
+                qsort(v, n, sizeof *v, cmp_names);
+                for (i = 0; i < n; i++) {
+                    size_t pl = path == g_dot ? 0 : strlen(path);
+                    char *child = xmalloc(pl + strlen(v[i]) + 2);
+                    memcpy(child, path, pl);
+                    if (pl && path[pl - 1] != '/') child[pl++] = '/';
+                    strcpy(child + pl, v[i]);
+                    grep_path(child, 0);
+                    free(child); free(v[i]);
+                }
+                free(v);
+                return;
+            }
+        } else if (!top && !S_ISREG(st.st_mode)) return;
+    }
+    if ((g_ninc && !name_listed(g_inc, g_ninc, path)) || (g_nexc && name_listed(g_exc, g_nexc, path))) return;
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { if (!g_nomsg) perr("%s", path); g_err = 1; return; }
+go:
+    gf_name = shown;
+    gf_show = g_name > 0 || (g_name < 0 && !top);
+    count = grep_fd(fd);
+    if (fd) close(fd);
+    if (g_count) {
+        if (gf_show) { fputs(shown, stdout); putchar(g_null ? 0 : ':'); }
+        printf("%ld\n", count);
+    }
+    if ((g_list && count) || (g_nolist && !count)) { fputs(shown, stdout); putchar(g_null ? 0 : '\n'); }
+}
+
+static int t_grep(int argc, char **argv)
+{
+    static const struct opt lo[] = {
+        { "extended-regexp", 0, 'E' }, { "fixed-strings", 0, 'F' }, { "basic-regexp", 0, 'G' }, { "perl-regexp", 0, 'P' },
+        { "regexp", 1, 'e' }, { "file", 1, 'f' }, { "ignore-case", 0, 'i' }, { "no-ignore-case", 0, 'j' }, { "invert-match", 0, 'v' },
+        { "word-regexp", 0, 'w' }, { "line-regexp", 0, 'x' }, { "count", 0, 'c' }, { "color", 2, 'k' }, { "colour", 2, 'k' },
+        { "files-without-match", 0, 'L' }, { "files-with-matches", 0, 'l' }, { "max-count", 1, 'm' }, { "only-matching", 0, 'o' },
+        { "quiet", 0, 'q' }, { "silent", 0, 'q' }, { "no-messages", 0, 's' }, { "byte-offset", 0, 'b' }, { "with-filename", 0, 'H' },
+        { "no-filename", 0, 'h' }, { "label", 1, 300 }, { "line-number", 0, 'n' }, { "null", 0, 'Z' }, { "text", 0, 'a' },
+        { "binary-files", 1, 301 }, { "directories", 1, 'd' }, { "devices", 1, 'D' }, { "recursive", 0, 'r' },
+        { "dereference-recursive", 0, 'R' }, { "include", 1, 'N' }, { "exclude", 1, 'X' }, { "exclude-dir", 1, 'Y' },
+        { "after-context", 1, 'A' }, { "before-context", 1, 'B' }, { "context", 1, 'C' }, { "line-buffered", 0, 'u' },
+        { "binary", 0, 'U' }, { "initial-tab", 0, 'T' }, { NULL, 0, 0 } };
+    int c, ere = 0, fixed = 0, icase = 0, w = 0, x = 0, havepat = 0, digits = 0, mode = 0;
+    char *pbuf = NULL;
+    size_t plen = 0;
+    struct rnode *all = NULL;
+    const char *p, *e;
+    usage_status = 2;
+    if (!strcmp(prog, "egrep")) ere = 1;
+    if (!strcmp(prog, "fgrep")) fixed = 1;
+    g_name = -2;
+    opts_reset();
+    while ((c = getopts(argc, argv, "EFGPe:f:iyvwxcLlm:oqsbHhnZaIUTd:D:rRA:B:C:V0123456789", lo))) {
+        if (c >= '0' && c <= '9') {
+            g_after = g_before = (digits ? g_after * 10 : 0) + c - '0';
+            g_ctx = digits = 1;
+            continue;
+        }
+        digits = 0;
+        switch (c) {
+        case 'E': case 'F': case 'G':
+            if (mode && mode != c) die(2, "conflicting matchers specified");
+            mode = c; ere = c == 'E'; fixed = c == 'F';
+            break;
+        case 'P': die(2, "Perl matching not supported in a --disable-perl-regexp build");
+        case 'e': case 'f': {
+            const char *add = optarg;
+            size_t al = strlen(optarg);
+            char *fb = NULL;
+            havepat = 1;
+            if (c == 'f') {
+                int fd = open_input(optarg);
+                if (fd < 0 || read_all(fd, &fb, &al) < 0) die(2, "%s: %s", optarg, strerror(errno));
+                if (fd) close(fd);
+                add = fb;
+            }
+            pbuf = xrealloc(pbuf, plen + al + 2);
+            memcpy(pbuf + plen, add, al); plen += al;
+            if (c == 'e' || (al && add[al - 1] != '\n')) pbuf[plen++] = '\n';
+            free(fb);
+            break;
+        }
+        case 'i': case 'y': icase = 1; break;
+        case 'j': icase = 0; break;
+        case 'v': g_invert = 1; break;
+        case 'w': w = 1; break;
+        case 'x': x = 1; break;
+        case 'c': g_count = 1; break;
+        case 'L': g_nolist = 1; g_list = 0; break;
+        case 'l': g_list = 1; g_nolist = 0; break;
+        case 'm': { unsigned long m; if (!parse_ulong(optarg, &m)) die(2, "invalid max count"); g_max = m; break; }
+        case 'o': g_only = 1; break;
+        case 'q': g_quiet = 1; break;
+        case 's': g_nomsg = 1; break;
+        case 'b': g_byte = 1; break;
+        case 'H': g_name = 1; break;
+        case 'h': g_name = 0; break;
+        case 'n': g_num = 1; break;
+        case 'Z': g_null = 1; break;
+        case 'a': g_text = 1; break;
+        case 'I': g_text = 2; break;
+        case 300: g_label = optarg; break;
+        case 301: g_text = !strcmp(optarg, "text") ? 1 : !strcmp(optarg, "without-match") ? 2 : !strcmp(optarg, "binary") ? 0 : (die(2, "unknown binary-files type"), 0); break;
+        case 'd':
+            if (!strcmp(optarg, "recurse")) g_recurse = 1;
+            else if (strcmp(optarg, "read") && !(g_dirs = !strcmp(optarg, "skip"))) die(2, "invalid argument '%s' for '--directories'", optarg);
+            break;
+        case 'r': g_recurse = 1; break;
+        case 'R': g_recurse = 2; break;
+        case 'N': g_inc = xrealloc(g_inc, (g_ninc + 1) * sizeof *g_inc); g_inc[g_ninc++] = optarg; break;
+        case 'X': g_exc = xrealloc(g_exc, (g_nexc + 1) * sizeof *g_exc); g_exc[g_nexc++] = optarg; break;
+        case 'Y': g_excd = xrealloc(g_excd, (g_nexcd + 1) * sizeof *g_excd); g_excd[g_nexcd++] = optarg; break;
+        case 'A': case 'B': case 'C': {
+            unsigned long n;
+            if (!parse_ulong(optarg, &n)) die(2, "%s: invalid context length argument", optarg);
+            if (c != 'B') g_after = n;
+            if (c != 'A') g_before = n;
+            g_ctx = 1;
+            break;
+        }
+        case 'u': g_lbuf = 1; break;
+        case 'V': printf("grep (rifle) " VERSION "\n"); return 0;
+        }
+    }
+    if (!havepat) {
+        if (!nops) { say("no pattern given"); usage_error(); }
+        p = ops[0];
+        pbuf = xmalloc(strlen(p) + 2);
+        plen = strlen(p);
+        memcpy(pbuf, p, plen); pbuf[plen++] = '\n';
+        ops++; nops--;
+    }
+    g_re = re_new(icase);
+    for (p = pbuf; p < pbuf + plen; p = e + 1) {
+        struct rnode *n;
+        e = memchr(p, '\n', pbuf + plen - p);
+        n = fixed ? re_literal(g_re, p, e - p) : re_parse(g_re, p, e - p, ere, 0);
+        all = all ? rn(N_ALT, all, n) : n;
+    }
+    if (!all) { all = rn(N_SET, NULL, NULL); all->c = re_newset(g_re); }
+    if (x) all = rn(N_CAT, re_assert(R_BOL), rn(N_CAT, all, re_assert(R_EOL)));
+    else if (w) all = rn(N_CAT, re_assert(R_BEFORE), rn(N_CAT, all, re_assert(R_AFTER)));
+    re_finish(g_re, all);
+    g_caps = xmalloc(2 * (g_re->ngrp + 1) * sizeof *g_caps);
+    if (g_name == -2) g_name = nops > 1 ? 1 : g_recurse ? -1 : 0;
+    if (g_max == 0) return 1;
+    if (!nops) {
+        grep_path(g_recurse ? g_dot : "-", 1);
+    } else {
+        int i;
+        for (i = 0; i < nops; i++) grep_path(ops[i], 1);
+    }
+    if (finish_stdout()) return 2;
+    return g_err ? 2 : g_any ? 0 : 1;
+}
+
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
@@ -7040,6 +7891,9 @@ static const struct applet applets[] = {
     { "expand", t_expand, "[OPTION]... [FILE]...", "Convert tabs in each FILE to spaces." },
     { "expr", t_expr, "EXPRESSION", "Print the value of EXPRESSION to standard output." },
     { "factor", t_factor, "[NUMBER]...", "Print the prime factors of each NUMBER." },
+    { "egrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
+    { "fgrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
+    { "grep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
     { "groups", t_id, "[OPTION]... [USERNAME]...", "Print the groups a user is in." },
     { "id", t_id, "[OPTION]... [USER]", "Print user and group information for the specified USER, or for the current user." },
     { "install", t_install, "[OPTION]... SOURCE... DIRECTORY", "Copy files and set attributes." },
