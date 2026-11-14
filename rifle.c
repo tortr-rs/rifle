@@ -7029,13 +7029,13 @@ static int t_factor(int argc, char **argv)
  * grep and sed both use it */
 
 enum { R_CHAR, R_ANY, R_SET, R_SPLIT, R_JMP, R_SAVE, R_BOL, R_EOL, R_WB, R_NWB, R_WBEG, R_WEND, R_BEFORE, R_AFTER,
-       R_BREF, R_MARK, R_PROG, R_MATCH };
+       R_BREF, R_MARK, R_PROG, R_BOS, R_EOS, R_MATCH };
 enum { N_EMPTY, N_CHAR, N_ANY, N_SET, N_CAT, N_ALT, N_REP, N_GRP, N_ASSERT, N_BREF };
 
 struct rinst { int op, x, y, id; };
 struct rnode { int t, c, min, max; struct rnode *a, *b; };
 struct regex {
-    struct rinst *prog; int n, cap, ngrp, nslot, nsplit, nmark, backref, icase, first;
+    struct rinst *prog; int n, cap, ngrp, nslot, nsplit, nmark, backref, icase, ml, first;
     unsigned char (*sets)[32]; int nsets;
 };
 struct rparse { const char *p, *e; int ere, sed, depth, local; struct regex *re; };
@@ -7246,8 +7246,8 @@ static struct rnode *re_atom(struct rparse *ps, int start, int *anchor)
         case 'B': ps->p = p; return re_assert(R_NWB);
         case '<': ps->p = p; return re_assert(R_WBEG);
         case '>': ps->p = p; return re_assert(R_WEND);
-        case '`': ps->p = p; return re_assert(R_BOL);
-        case '\'': ps->p = p; return re_assert(R_EOL);
+        case '`': ps->p = p; return re_assert(R_BOS);
+        case '\'': ps->p = p; return re_assert(R_EOS);
         }
         if (c >= '1' && c <= '9') {
             struct rnode *n;
@@ -7504,8 +7504,10 @@ static int re_exec(const struct regex *re, const char *s, size_t len, size_t sta
                 work[in->x] = pos; pc++;
                 continue;
             case R_PROG: if (work[in->x] == pos) goto fail; pc++; continue;
-            case R_BOL: if (pos == 0) { pc++; continue; } goto fail;
-            case R_EOL: if ((size_t)pos == len) { pc++; continue; } goto fail;
+            case R_BOL: if (pos == 0 || (re->ml && s[pos - 1] == '\n')) { pc++; continue; } goto fail;
+            case R_EOL: if ((size_t)pos == len || (re->ml && s[pos] == '\n')) { pc++; continue; } goto fail;
+            case R_BOS: if (pos == 0) { pc++; continue; } goto fail;
+            case R_EOS: if ((size_t)pos == len) { pc++; continue; } goto fail;
             case R_WB: if (word_at(s, len, pos - 1) != word_at(s, len, pos)) { pc++; continue; } goto fail;
             case R_NWB: if (word_at(s, len, pos - 1) == word_at(s, len, pos)) { pc++; continue; } goto fail;
             case R_WBEG: if (!word_at(s, len, pos - 1) && word_at(s, len, pos)) { pc++; continue; } goto fail;
@@ -7874,6 +7876,729 @@ static int t_grep(int argc, char **argv)
     return g_err ? 2 : g_any ? 0 : 1;
 }
 
+/* ---- sed ---- */
+
+struct saddr { int t; long n, step; struct regex *re; };   /* t: 0 none, n line, $ last, r regex, ~ first~step, + addr1,+N, % addr1,~N */
+struct srep { int kind; char *s; size_t len; int n; };      /* kind: 0 text, 1 group, 2 case change \U \L \u \l \E */
+struct scmd {
+    struct saddr a1, a2;
+    int c, neg, active, jump, wf, nrep, g, p, nth;
+    long end, num;
+    char *text; size_t tlen;
+    struct regex *re;
+    struct srep *rep;
+};
+struct sbuf { char *p; size_t len, cap; int chomped; };
+struct sout { FILE *f; int missing; };
+struct sfile { char *name; struct sout o; };
+
+static struct scmd *sc;
+static int nsc, nflag, sep_files, ere_sed, inplace, quit_now, replaced;
+static const char *inplace_suffix;
+static long s_lineno, s_wrap = 70;
+static int s_status, s_next, s_end, s_open;
+static char **s_files;
+static const char *s_fname = "-";
+static struct lr s_lr;
+static struct sbuf s_ps, s_hs;
+static struct sout s_stdout, *s_out;
+static struct sfile *s_wfiles;
+static int s_nwfiles;
+static struct { int kind; char *s; size_t len; } *s_app;
+static int s_napp;
+static struct regex *s_lastre;
+static long *s_caps;
+static int s_ncaps;
+
+static void sb_add(struct sbuf *b, const char *s, size_t n)
+{
+    if (b->len + n + 1 > b->cap) { b->cap = (b->len + n + 1) * 2; b->p = xrealloc(b->p, b->cap); }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+}
+
+static void s_put(struct sout *o, const char *p, size_t n, int nl)
+{
+    if (o->missing) { putc('\n', o->f); o->missing = 0; }
+    fwrite(p, 1, n, o->f);
+    if (nl) putc('\n', o->f); else o->missing = 1;
+}
+static void s_raw(struct sout *o, const char *p, size_t n)
+{
+    if (o->missing) { putc('\n', o->f); o->missing = 0; }
+    fwrite(p, 1, n, o->f);
+}
+
+/* ---- reading the script ---- */
+
+static const char *sp, *se, *sstart;
+static __attribute__((noreturn)) void sdie(const char *m) { die(1, "-e expression #1, char %ld: %s", (long)(sp - sstart), m); }
+
+static void s_skip(void) { while (sp < se && (*sp == ' ' || *sp == '\t')) sp++; }
+static void s_skipall(void) { while (sp < se && (isspace((unsigned char)*sp) || *sp == ';')) sp++; }
+
+static long s_num(void)
+{
+    long n = 0;
+    while (sp < se && isdigit((unsigned char)*sp)) n = n * 10 + *sp++ - '0';
+    return n;
+}
+
+/* up to the next unescaped delimiter. \delim is the delimiter itself, the rest of the escapes stay for whoever reads them */
+static char *s_slash(int delim, size_t *len, int regex)
+{
+    char *b = xmalloc(se - sp + 1);
+    size_t n = 0;
+    while (sp < se) {
+        int c = *sp++;
+        if (c == delim) { *len = n; b[n] = 0; return b; }
+        if (c == '\\' && sp < se) {
+            if (*sp == delim) { b[n++] = *sp++; continue; }
+            if (*sp == '\n' && regex) { b[n++] = '\n'; sp++; continue; }
+            b[n++] = c; b[n++] = *sp++;
+            continue;
+        }
+        if (c == '\n' && regex) break;
+        b[n++] = c;
+    }
+    sdie("unterminated `s' command");
+}
+
+static struct regex *s_regex(const char *pat, size_t len, int icase, int ml)
+{
+    struct regex *re;
+    struct rnode *n;
+    if (!len) return NULL;
+    re = re_new(icase);
+    re->ml = ml;
+    n = re_parse(re, pat, len, ere_sed, 1);
+    re_finish(re, n);
+    if (re->ngrp + 1 > s_ncaps) { s_ncaps = re->ngrp + 1; s_caps = xrealloc(s_caps, 2 * s_ncaps * sizeof *s_caps); }
+    return re;
+}
+
+static int s_addr(struct saddr *a)
+{
+    memset(a, 0, sizeof *a);
+    if (sp >= se) return 0;
+    if (isdigit((unsigned char)*sp)) {
+        a->n = s_num();
+        if (sp < se && *sp == '~') { sp++; a->t = '~'; a->step = s_num(); }
+        else a->t = 'n';
+    } else if (*sp == '$') { sp++; a->t = '$'; }
+    else if (*sp == '/' || *sp == '\\') {
+        int d = '/', icase = 0, ml = 0;
+        char *pat;
+        size_t l;
+        if (*sp == '\\') { sp++; if (sp >= se) sdie("unexpected `,'"); d = *sp; }
+        sp++;
+        pat = s_slash(d, &l, 1);
+        for (; sp < se; sp++) { if (*sp == 'I') icase = 1; else if (*sp == 'M') ml = 1; else break; }
+        a->t = 'r';
+        a->re = s_regex(pat, l, icase, ml);
+    } else return 0;
+    return 1;
+}
+
+static struct sout *s_wfile(const char *name)
+{
+    int i;
+    if (!strcmp(name, "/dev/stdout")) return &s_stdout;
+    for (i = 0; i < s_nwfiles; i++) if (!strcmp(s_wfiles[i].name, name)) return &s_wfiles[i].o;
+    s_wfiles = xrealloc(s_wfiles, (s_nwfiles + 1) * sizeof *s_wfiles);
+    s_wfiles[s_nwfiles].name = xstrdup(name);
+    s_wfiles[s_nwfiles].o.missing = 0;
+    s_wfiles[s_nwfiles].o.f = !strcmp(name, "/dev/stderr") ? stderr : fopen(name, "w");
+    if (!s_wfiles[s_nwfiles].o.f) die(4, "couldn't open file %s: %s", name, strerror(errno));
+    return &s_wfiles[s_nwfiles++].o;
+}
+
+static char *s_rest(void)
+{
+    const char *b;
+    char *r;
+    s_skip();
+    b = sp;
+    while (sp < se && *sp != '\n') sp++;
+    if (b == sp) sdie("missing filename in r/R/w/W commands");
+    r = xmalloc(sp - b + 1);
+    memcpy(r, b, sp - b); r[sp - b] = 0;
+    return r;
+}
+
+static int s_hex(int c) { return isdigit(c) ? c - '0' : (c | 32) - 'a' + 10; }
+
+/* the text of a, i and c: a one-liner, or a backslash and a newline first, a backslash before a newline carries on */
+static void s_text(struct scmd *c)
+{
+    struct sbuf b = { 0 };
+    s_skip();
+    if (sp < se && *sp == '\\') {
+        const char *after = ++sp;
+        s_skip();
+        if (sp < se && *sp == '\n') sp++;
+        else sp = after;
+    }
+    if (sp >= se) sdie("expected \\ after `a', `c' or `i'");
+    while (sp < se && *sp != '\n') {
+        char ch = *sp++, e;
+        if (ch == '\\' && sp < se) {
+            e = *sp++;
+            if (e == 'n') ch = '\n';
+            else if (e == 't') ch = '\t';
+            else if (e == 'f') ch = '\f';
+            else if (e == 'v') ch = '\v';
+            else if (e == 'a') ch = 7;
+            else if (e == 'r') ch = '\r';
+            else if (e == 'x' && sp + 1 < se && isxdigit((unsigned char)sp[0]) && isxdigit((unsigned char)sp[1])) { ch = s_hex(sp[0]) * 16 + s_hex(sp[1]); sp += 2; }
+            else ch = e;
+        }
+        sb_add(&b, &ch, 1);
+    }
+    sb_add(&b, "\n", 1);
+    c->text = b.p; c->tlen = b.len;
+}
+
+static void s_replacement(struct scmd *c, const char *s, size_t n)
+{
+    struct sbuf lit = { 0 };
+    size_t i;
+    int cap = 0;
+    c->rep = NULL; c->nrep = 0;
+#define S_LIT() do { if (lit.len) { c->rep = xrealloc(c->rep, (c->nrep + 1) * sizeof *c->rep); c->rep[c->nrep].kind = 0; c->rep[c->nrep].s = lit.p; c->rep[c->nrep].len = lit.len; c->nrep++; memset(&lit, 0, sizeof lit); } } while (0)
+#define S_PUSH(k, v) do { S_LIT(); c->rep = xrealloc(c->rep, (c->nrep + 1) * sizeof *c->rep); c->rep[c->nrep].kind = (k); c->rep[c->nrep].n = (v); c->nrep++; } while (0)
+    for (i = 0; i < n; i++) {
+        char ch = s[i];
+        if (ch == '&') { S_PUSH(1, 0); continue; }
+        if (ch == '\\' && i + 1 < n) {
+            ch = s[++i];
+            if (isdigit((unsigned char)ch)) { S_PUSH(1, ch - '0'); cap = cap > ch - '0' ? cap : ch - '0'; continue; }
+            if (ch == 'U' || ch == 'L' || ch == 'u' || ch == 'l' || ch == 'E') { S_PUSH(2, ch); continue; }
+            if (ch == 'n') ch = '\n';
+            else if (ch == 't') ch = '\t';
+            else if (ch == 'f') ch = '\f';
+            else if (ch == 'v') ch = '\v';
+            else if (ch == 'a') ch = 7;
+            else if (ch == 'r') ch = '\r';
+            else if (ch == 'x' && i + 2 < n && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) { ch = s_hex(s[i + 1]) * 16 + s_hex(s[i + 2]); i += 2; }
+        }
+        sb_add(&lit, &ch, 1);
+    }
+    S_LIT();
+    if (c->re && cap > c->re->ngrp) die(1, "invalid reference \\%d on `s' command's RHS", cap);
+}
+
+static void s_end_of_cmd(void)
+{
+    s_skip();
+    if (sp >= se || *sp == '\n' || *sp == ';') { if (sp < se) sp++; return; }
+    if (*sp == '}' || *sp == '#') return;
+    sdie("extra characters after command");
+}
+
+static void s_label(struct scmd *c, int jump)
+{
+    const char *b;
+    s_skip();
+    b = sp;
+    while (sp < se && !isspace((unsigned char)*sp) && *sp != ';' && !(jump && *sp == '}')) sp++;
+    c->text = xmalloc(sp - b + 1);
+    memcpy(c->text, b, sp - b); c->text[sp - b] = 0;
+}
+
+static void s_parse(const char *script, size_t len)
+{
+    int *stack = xmalloc((len + 1) * sizeof *stack), depth = 0, i;
+    sp = sstart = script; se = script + len;
+    for (;;) {
+        struct scmd *c;
+        s_skipall();
+        if (sp >= se) break;
+        if (*sp == '#') { while (sp < se && *sp != '\n') sp++; continue; }
+        sc = xrealloc(sc, (nsc + 1) * sizeof *sc);
+        c = &sc[nsc];
+        memset(c, 0, sizeof *c);
+        c->jump = -1; c->wf = -1;
+        if (s_addr(&c->a1)) {
+            s_skip();
+            if (sp < se && *sp == ',') {
+                sp++; s_skip();
+                if (sp < se && (*sp == '+' || *sp == '~') && sp + 1 < se && isdigit((unsigned char)sp[1])) {
+                    c->a2.t = *sp == '+' ? '+' : '%'; sp++; c->a2.n = s_num();
+                } else if (!s_addr(&c->a2)) sdie("unexpected `,'");
+                else if (c->a2.t == '~') sdie("unexpected `,'");
+            }
+            if (c->a1.t == 'n' && c->a1.n == 0 && c->a2.t != 'r') sdie("invalid usage of line address 0");
+        }
+        s_skip();
+        while (sp < se && *sp == '!') { c->neg = 1; sp++; s_skip(); }
+        if (sp >= se) sdie("missing command");
+        c->c = *sp++;
+        switch (c->c) {
+        case '{': stack[depth++] = nsc; nsc++; continue;
+        case '}':
+            if (!depth) sdie("unexpected `}'");
+            if (c->a1.t) sdie("} doesn't want any addresses");
+            sc[stack[--depth]].jump = nsc;
+            nsc++;
+            s_end_of_cmd();
+            continue;
+        case ':':
+            if (c->a1.t) sdie(": doesn't want any addresses");
+            s_label(c, 0);
+            if (!*c->text) sdie("\":\" lacks a label");
+            break;
+        case 'b': case 't': case 'T': s_label(c, 1); s_end_of_cmd(); break;
+        case 'a': case 'i': case 'c': s_text(c); break;
+        case 'r': c->text = s_rest(); break;
+        case 'w': c->text = s_rest(); c->wf = 0; s_wfile(c->text); break;
+        case 'q': case 'Q': case 'l': case 'L':
+            s_skip();
+            c->num = -1;
+            if (sp < se && isdigit((unsigned char)*sp)) c->num = s_num();
+            s_end_of_cmd();
+            break;
+        case '=': case 'd': case 'D': case 'g': case 'G': case 'h': case 'H': case 'n': case 'N': case 'p': case 'P': case 'x': case 'z': case 'F':
+            s_end_of_cmd();
+            break;
+        case 'y': {
+            char *a, *b;
+            size_t la, lb, k, m = 0;
+            int d;
+            unsigned char map[256];
+            if (sp >= se) sdie("unterminated `y' command");
+            d = *sp++;
+            a = s_slash(d, &la, 0); b = s_slash(d, &lb, 0);
+            for (k = 0; k < 256; k++) map[k] = k;
+            {
+                char *x = xmalloc(la + 1), *y = xmalloc(lb + 1);
+                size_t nx = 0, ny = 0;
+                for (k = 0; k < la; k++) { if (a[k] == '\\' && k + 1 < la) { k++; x[nx++] = a[k] == 'n' ? '\n' : a[k] == 't' ? '\t' : a[k]; } else x[nx++] = a[k]; }
+                for (k = 0; k < lb; k++) { if (b[k] == '\\' && k + 1 < lb) { k++; y[ny++] = b[k] == 'n' ? '\n' : b[k] == 't' ? '\t' : b[k]; } else y[ny++] = b[k]; }
+                if (nx != ny) sdie("strings for `y' command are different lengths");
+                for (; m < nx; m++) map[(unsigned char)x[m]] = y[m];
+            }
+            c->text = xmalloc(256); memcpy(c->text, map, 256);
+            s_end_of_cmd();
+            break;
+        }
+        case 's': {
+            char *pat, *rep;
+            size_t lp, lr;
+            int d, icase = 0, ml = 0;
+            if (sp >= se) sdie("unterminated `s' command");
+            d = *sp++;
+            pat = s_slash(d, &lp, 1);
+            rep = s_slash(d, &lr, 0);
+            for (; sp < se; sp++) {
+                if (*sp == 'g' && !c->g) c->g = 1;
+                else if (*sp == 'p' && !c->p) c->p = 1;
+                else if (*sp == 'i' || *sp == 'I') icase = 1;
+                else if (*sp == 'm' || *sp == 'M') ml = 1;
+                else if (isdigit((unsigned char)*sp)) { c->nth = s_num(); sp--; if (!c->nth) sdie("number option to `s' command may not be zero"); }
+                else if (*sp == 'w') { sp++; c->text = s_rest(); c->wf = 0; s_wfile(c->text); break; }
+                else break;
+            }
+            c->re = s_regex(pat, lp, icase, ml);
+            s_replacement(c, rep, lr);
+            s_end_of_cmd();
+            break;
+        }
+        default: sdie("unknown command");
+        }
+        nsc++;
+    }
+    if (depth) sdie("unmatched `{'");
+    for (i = 0; i < nsc; i++) {
+        struct scmd *c = &sc[i];
+        int k;
+        if (c->c != 'b' && c->c != 't' && c->c != 'T') continue;
+        if (!*c->text) { c->jump = nsc; continue; }
+        for (k = 0; k < nsc; k++) if (sc[k].c == ':' && !strcmp(sc[k].text, c->text)) break;
+        if (k == nsc) die(4, "-e expression #1, char 0: can't find label for jump to `%s'", c->text);
+        c->jump = k;
+    }
+    free(stack);
+}
+
+/* ---- running it ---- */
+
+static int s_open_next(void)
+{
+    int fd;
+    while (s_next < s_end) {
+        const char *f = s_files[s_next++];
+        fd = open_input(f);
+        if (fd < 0) { say("can't read %s: %s", f, strerror(errno)); s_status = 2; continue; }
+        lr_init(&s_lr, fd);
+        s_open = 1; s_fname = f;
+        return 1;
+    }
+    return 0;
+}
+static void s_close(void) { if (s_lr.fd) close(s_lr.fd); free(s_lr.buf); s_open = 0; }
+
+static int s_getline(void)
+{
+    char *s; size_t len; int nl;
+    for (;;) {
+        if (s_open) {
+            if (lr_line(&s_lr, &s, &len, &nl)) {
+                s_ps.len = 0; sb_add(&s_ps, s, len);
+                s_ps.chomped = nl; s_lineno++; replaced = 0;
+                return 1;
+            }
+            s_close();
+        }
+        if (!s_open_next()) return 0;
+    }
+}
+
+static int s_islast(void)
+{
+    for (;;) {
+        if (s_open) { if (lr_more(&s_lr)) return 0; s_close(); }
+        if (!s_open_next()) return 1;
+    }
+}
+
+static int s_match1(struct saddr *a)
+{
+    switch (a->t) {
+    case 'n': return s_lineno == a->n;
+    case '$': return s_islast();
+    case '~': return s_lineno >= a->n && (a->step ? (s_lineno - a->n) % a->step == 0 : s_lineno == a->n);
+    case 'r': {
+        struct regex *re = a->re ? a->re : s_lastre;
+        if (!re) die(1, "no previous regular expression");
+        s_lastre = re;
+        return re_exec(re, s_ps.p, s_ps.len, 0, 0, NULL);
+    }
+    }
+    return 1;
+}
+
+static int s_match(struct scmd *c)
+{
+    if (!c->a1.t) return 1;
+    if (!c->a2.t) return s_match1(&c->a1);
+    if (c->active) {
+        if (c->a2.t == 'n' || c->a2.t == '+' || c->a2.t == '%') {
+            if (s_lineno >= c->end) c->active = 0;
+            return s_lineno <= c->end;
+        }
+        if (s_match1(&c->a2)) c->active = 0;
+        return 1;
+    }
+    if (!s_match1(&c->a1)) return 0;
+    switch (c->a2.t) {
+    case 'n': c->end = c->a2.n; break;
+    case '+': c->end = s_lineno + c->a2.n; break;
+    case '%': c->end = c->a2.n > 0 ? s_lineno + c->a2.n - s_lineno % c->a2.n : s_lineno; break;
+    default: c->active = 1; return 1;
+    }
+    c->active = s_lineno < c->end;
+    return 1;
+}
+
+static void s_flush_app(void)
+{
+    int i;
+    for (i = 0; i < s_napp; i++) {
+        if (s_app[i].kind == 0) s_raw(s_out, s_app[i].s, s_app[i].len);
+        else {
+            int fd = open(s_app[i].s, O_RDONLY);
+            char *d; size_t n;
+            if (fd >= 0) { if (read_all(fd, &d, &n) == 0) { s_raw(s_out, d, n); free(d); } close(fd); }
+        }
+    }
+    s_napp = 0;
+}
+static void s_queue(int kind, char *s, size_t len)
+{
+    s_app = xrealloc(s_app, (s_napp + 1) * sizeof *s_app);
+    s_app[s_napp].kind = kind; s_app[s_napp].s = s; s_app[s_napp].len = len; s_napp++;
+}
+
+static void s_list(long width)
+{
+    size_t i;
+    long col = 0;
+    for (i = 0; i < s_ps.len; i++) {
+        unsigned char ch = s_ps.p[i];
+        char b[8];
+        int n;
+        switch (ch) {
+        case '\\': strcpy(b, "\\\\"); break;
+        case 7: strcpy(b, "\\a"); break;
+        case '\b': strcpy(b, "\\b"); break;
+        case '\f': strcpy(b, "\\f"); break;
+        case '\n': strcpy(b, "\\n"); break;
+        case '\r': strcpy(b, "\\r"); break;
+        case '\t': strcpy(b, "\\t"); break;
+        case '\v': strcpy(b, "\\v"); break;
+        default:
+            if (ch >= 32 && ch < 127) { b[0] = ch; b[1] = 0; }
+            else snprintf(b, sizeof b, "\\%03o", ch);
+        }
+        n = strlen(b);
+        if (width > 0 && col + n > width - 1) { s_raw(s_out, "\\\n", 2); col = 0; }
+        s_raw(s_out, b, n);
+        col += n;
+    }
+    s_raw(s_out, "$\n", 2);
+}
+
+static void s_case(struct sbuf *b, const char *s, size_t n, int *mode, int *once)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        unsigned char ch = s[i];
+        if (*once) { ch = *once == 'u' ? toupper(ch) : tolower(ch); *once = 0; }
+        else if (*mode) ch = *mode == 'U' ? toupper(ch) : tolower(ch);
+        sb_add(b, (char *)&ch, 1);
+    }
+}
+
+static int s_subst(struct scmd *c)
+{
+    struct regex *re = c->re ? c->re : s_lastre;
+    struct sbuf out = { 0 };
+    size_t pos = 0, copied = 0;
+    long prev = -1, count = 0;
+    int did = 0, nth = c->nth ? c->nth : 1;
+    if (!re) die(1, "no previous regular expression");
+    s_lastre = re;
+    while (pos <= s_ps.len && re_exec(re, s_ps.p, s_ps.len, pos, 1, s_caps)) {
+        long ms = s_caps[0], me = s_caps[1];
+        int i, mode = 0, once = 0;
+        if (me == ms && ms == prev) {
+            if ((size_t)ms >= s_ps.len) break;
+            pos = ms + 1;
+            continue;
+        }
+        count++;
+        if (count >= nth) {
+            sb_add(&out, s_ps.p + copied, ms - copied);
+            for (i = 0; i < c->nrep; i++) {
+                struct srep *r = &c->rep[i];
+                if (r->kind == 0) s_case(&out, r->s, r->len, &mode, &once);
+                else if (r->kind == 1) {
+                    if (r->n <= re->ngrp && s_caps[2 * r->n] >= 0) s_case(&out, s_ps.p + s_caps[2 * r->n], s_caps[2 * r->n + 1] - s_caps[2 * r->n], &mode, &once);
+                } else if (r->n == 'E') mode = once = 0;
+                else if (r->n == 'U' || r->n == 'L') mode = r->n;
+                else once = r->n;
+            }
+            copied = me; did = 1;
+            if (!c->g) break;
+        }
+        prev = me;
+        if (me == ms) { if ((size_t)ms >= s_ps.len) break; pos = me + 1; } else pos = me;
+    }
+    if (!did) { free(out.p); return 0; }
+    sb_add(&out, s_ps.p + copied, s_ps.len - copied);
+    out.chomped = s_ps.chomped;
+    free(s_ps.p);
+    s_ps = out;
+    return 1;
+}
+
+static void s_print(struct sbuf *b) { s_put(s_out, b->p, b->len, b->chomped); }
+
+/* one pass of the script over the pattern space. returns 1 to go on with the next line, 0 once sed should stop */
+static int s_cycle(void)
+{
+    int pc = 0, replay;
+    do {
+        replay = 0;
+        pc = 0;
+        while (pc < nsc) {
+            struct scmd *c = &sc[pc];
+            int hit = s_match(c) != c->neg;
+            if (!hit) { pc = c->c == '{' ? c->jump + 1 : pc + 1; continue; }
+            pc++;
+            switch (c->c) {
+            case '{': case '}': case ':': break;
+            case '=': { char b[24]; int n = snprintf(b, sizeof b, "%ld\n", s_lineno); s_raw(s_out, b, n); break; }
+            case 'a': s_queue(0, c->text, c->tlen); break;
+            case 'i': s_raw(s_out, c->text, c->tlen); break;
+            case 'c':
+                if (!c->a2.t || c->neg || !c->active) s_raw(s_out, c->text, c->tlen);
+                goto delete;
+            case 'b': pc = c->jump; break;
+            case 't': if (replaced) { replaced = 0; pc = c->jump; } break;
+            case 'T': if (!replaced) pc = c->jump; else replaced = 0; break;
+            case 'd': delete: s_ps.len = 0; s_flush_app(); return 1;
+            case 'D': {
+                char *nlp = memchr(s_ps.p, '\n', s_ps.len);
+                if (!nlp) goto delete;
+                s_ps.len -= nlp + 1 - s_ps.p;
+                memmove(s_ps.p, nlp + 1, s_ps.len);
+                s_flush_app();
+                replay = 1;
+                pc = nsc;
+                break;
+            }
+            case 'F': s_put(s_out, s_fname, strlen(s_fname), 1); break;
+            case 'g': s_ps.len = 0; sb_add(&s_ps, s_hs.p, s_hs.len); s_ps.chomped = s_hs.chomped; break;
+            case 'G': sb_add(&s_ps, "\n", 1); sb_add(&s_ps, s_hs.p, s_hs.len); s_ps.chomped = s_hs.chomped; break;
+            case 'h': s_hs.len = 0; sb_add(&s_hs, s_ps.p, s_ps.len); s_hs.chomped = s_ps.chomped; break;
+            case 'H': sb_add(&s_hs, "\n", 1); sb_add(&s_hs, s_ps.p, s_ps.len); s_hs.chomped = s_ps.chomped; break;
+            case 'x': { struct sbuf t = s_ps; s_ps = s_hs; s_hs = t; break; }
+            case 'l': s_list(c->num >= 0 ? c->num : s_wrap); break;
+            case 'n':
+                if (s_islast()) { if (!nflag) s_print(&s_ps); s_flush_app(); return 0; }
+                if (!nflag) s_print(&s_ps);
+                s_flush_app();
+                s_getline();
+                break;
+            case 'N':
+                if (s_islast()) { if (!nflag) s_print(&s_ps); s_flush_app(); return 0; }
+                s_flush_app();
+                {
+                    struct sbuf keep = s_ps;
+                    memset(&s_ps, 0, sizeof s_ps);
+                    s_getline();
+                    sb_add(&keep, "\n", 1);
+                    sb_add(&keep, s_ps.p, s_ps.len);
+                    keep.chomped = s_ps.chomped;
+                    free(s_ps.p);
+                    s_ps = keep;
+                }
+                break;
+            case 'p': s_print(&s_ps); break;
+            case 'P': { char *nlp = memchr(s_ps.p, '\n', s_ps.len); s_put(s_out, s_ps.p, nlp ? (size_t)(nlp - s_ps.p) : s_ps.len, 1); break; }
+            case 'q': if (!nflag) s_print(&s_ps); s_flush_app(); quit_now = 1; s_status = c->num >= 0 ? c->num : s_status; return 0;
+            case 'Q': quit_now = 1; s_status = c->num >= 0 ? c->num : s_status; return 0;
+            case 'r': s_queue(1, c->text, 0); break;
+            case 's':
+                if (s_subst(c)) {
+                    replaced = 1;
+                    if (c->p) s_print(&s_ps);
+                    if (c->wf >= 0) { struct sout *o = s_wfile(c->text); s_put(o, s_ps.p, s_ps.len, s_ps.chomped); }
+                }
+                break;
+            case 'w': { struct sout *o = s_wfile(c->text); s_put(o, s_ps.p, s_ps.len, s_ps.chomped); break; }
+            case 'y': { size_t i; for (i = 0; i < s_ps.len; i++) s_ps.p[i] = c->text[(unsigned char)s_ps.p[i]]; break; }
+            case 'z': s_ps.len = 0; break;
+            }
+        }
+    } while (replay);
+    if (!nflag) s_print(&s_ps);
+    s_flush_app();
+    return 1;
+}
+
+static void s_run(void)
+{
+    int i;
+    for (i = 0; i < nsc; i++) sc[i].active = sc[i].a1.t == 'n' && sc[i].a1.n == 0 && sc[i].a2.t == 'r';
+    s_lineno = 0;
+    while (s_getline()) if (!s_cycle()) break;
+}
+
+/* -i: the output goes to a file beside the original, which is then replaced by it */
+static char *s_ip_tmp;
+static struct sout s_ip_o;
+
+static int s_inplace_open(const char *name)
+{
+    struct stat st;
+    const char *slash = strrchr(name, '/');
+    size_t dl = slash ? slash - name + 1 : 0;
+    int fd;
+    if (stat(name, &st) < 0) { say("can't read %s: %s", name, strerror(errno)); s_status = 2; return 1; }
+    if (!S_ISREG(st.st_mode)) { say("couldn't edit %s: not a regular file", name); s_status = 4; return 1; }
+    s_ip_tmp = xmalloc(dl + 32);
+    memcpy(s_ip_tmp, name, dl);
+    snprintf(s_ip_tmp + dl, 32, "sed%ld", (long)getpid());
+    fd = open(s_ip_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) die(4, "couldn't open temporary file %s: %s", s_ip_tmp, strerror(errno));
+    fchmod(fd, st.st_mode & 07777);
+    fchown(fd, st.st_uid, st.st_gid);
+    s_ip_o.f = fdopen(fd, "w"); s_ip_o.missing = 0;
+    s_out = &s_ip_o;
+    return 0;
+}
+
+static void s_inplace_close(const char *name)
+{
+    if (fclose(s_ip_o.f)) die(4, "couldn't flush %s: %s", s_ip_tmp, strerror(errno));
+    if (inplace_suffix && *inplace_suffix) {
+        const char *base = base_of(name), *p;
+        size_t dl = base - name;
+        char *bak = xmalloc(dl + strlen(inplace_suffix) * (strlen(base) + 1) + strlen(base) + 2), *o = bak;
+        if (!strchr(inplace_suffix, '/')) { memcpy(o, name, dl); o += dl; }
+        if (strchr(inplace_suffix, '*')) {
+            for (p = inplace_suffix; *p; p++) { if (*p == '*') { strcpy(o, base); o += strlen(base); } else *o++ = *p; }
+            *o = 0;
+        } else sprintf(o, "%s%s", base, inplace_suffix);
+        if (rename(name, bak) < 0) die(4, "cannot rename %s: %s", name, strerror(errno));
+    }
+    if (rename(s_ip_tmp, name) < 0) die(4, "cannot rename %s: %s", s_ip_tmp, strerror(errno));
+    free(s_ip_tmp);
+    s_out = &s_stdout;
+}
+
+static int t_sed(int argc, char **argv)
+{
+    static const struct opt lo[] = {
+        { "quiet", 0, 'n' }, { "silent", 0, 'n' }, { "expression", 1, 'e' }, { "file", 1, 'f' }, { "regexp-extended", 0, 'E' },
+        { "in-place", 2, 'i' }, { "separate", 0, 's' }, { "line-length", 1, 'l' }, { "unbuffered", 0, 'u' }, { "posix", 0, 'u' },
+        { "binary", 0, 'u' }, { "follow-symlinks", 0, 'u' }, { "sandbox", 0, 'u' }, { NULL, 0, 0 } };
+    int c, have = 0;
+    struct sbuf script = { 0 };
+    opts_reset();
+    while ((c = getopts(argc, argv, "nEre:f:i::sl:u", lo)))
+        switch (c) {
+        case 'n': nflag = 1; break;
+        case 'E': case 'r': ere_sed = 1; break;
+        case 'e': sb_add(&script, optarg, strlen(optarg)); sb_add(&script, "\n", 1); have = 1; break;
+        case 'f': {
+            int fd = open_input(optarg);
+            char *d; size_t n;
+            if (fd < 0 || read_all(fd, &d, &n) < 0) die(1, "couldn't open file %s: %s", optarg, strerror(errno));
+            if (fd) close(fd);
+            sb_add(&script, d, n);
+            if (n && d[n - 1] != '\n') sb_add(&script, "\n", 1);
+            free(d);
+            have = 1;
+            break;
+        }
+        case 'i': inplace = sep_files = 1; inplace_suffix = optarg; break;
+        case 's': sep_files = 1; break;
+        case 'l': { unsigned long w; if (!parse_ulong(optarg, &w)) die(1, "invalid line length"); s_wrap = w; break; }
+        }
+    if (!have) {
+        if (!nops) { fputs("Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...\n", stderr); return 1; }
+        sb_add(&script, ops[0], strlen(ops[0]));
+        ops++; nops--;
+    }
+    re_exit = 1;
+    if (script.len >= 2 && script.p[0] == '#' && script.p[1] == 'n' && (script.len == 2 || script.p[2] == '\n')) nflag = 1;
+    s_parse(script.p ? script.p : "", script.len);
+    s_stdout.f = stdout;
+    s_hs.chomped = 1;
+    s_out = &s_stdout;
+    if (!nops) { static char *dash[] = { "-", NULL }; if (inplace) die(4, "no input files"); s_files = dash; s_next = 0; s_end = 1; }
+    else { s_files = ops; s_next = 0; s_end = nops; }
+    if (!sep_files) s_run();
+    else {
+        int i, n = s_end;
+        for (i = 0; i < n && !quit_now; i++) {
+            s_next = i; s_end = i + 1;
+            if (inplace && s_inplace_open(s_files[i])) continue;
+            s_run();
+            if (inplace) s_inplace_close(s_files[i]);
+        }
+    }
+    {
+        int i;
+        for (i = 0; i < s_nwfiles; i++) if (s_wfiles[i].o.f != stderr) fclose(s_wfiles[i].o.f);
+    }
+    return finish_stdout() ? 4 : s_status;
+}
+
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
@@ -7952,6 +8677,7 @@ static const struct applet applets[] = {
     { "realpath", t_realpath, "[OPTION]... FILE...", "Print the resolved absolute file name." },
     { "rm", t_rm, "[OPTION]... [FILE]...", "Remove (unlink) the FILE(s)." },
     { "rmdir", t_rmdir, "[OPTION]... DIRECTORY...", "Remove the DIRECTORY(ies), if they are empty." },
+    { "sed", t_sed, "[OPTION]... {script-only-if-no-other-script} [input-file]...", "Edit streams of text, line by line." },
     { "seq", t_seq, "[OPTION]... [FIRST [INCREMENT]] LAST", "Print numbers from FIRST to LAST in steps of INCREMENT." },
     { "sleep", t_sleep, "NUMBER[SUFFIX]...", "Pause for NUMBER seconds. SUFFIX may be s, m, h or d." },
     { "sort", t_sort, "[OPTION]... [FILE]...", "Write the sorted concatenation of all FILEs to standard output." },

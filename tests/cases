@@ -1101,3 +1101,329 @@ echo 'ABab' > f; $X grep -iE '(a)(b)\1\2' f
 echo 'ABab' > f; $X grep -iw 'abab' f
 echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac > f; $X grep -E '(a*)*b' f
 echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac > f; $X grep -cE '(a|aa)+$' f
+# sed
+printf '1\n2\n3\n4\n5\n' > f; $X sed p f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n p f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 2p f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,4p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '$p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2,3d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2!d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '$!d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1~2d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2~2p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '0~3p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,~2p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,+1p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '4,2p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,2p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/2/,/4/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/2/,3p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,/[0-9]/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '0,/1/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '1,/1/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/[24]/,+1p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/2/,/nomatch/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/2/!p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,4!p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '\,3,p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '\|3|p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '$=' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed = f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '/3/=' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 3q f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 3Q f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 3q5 f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '3{p;q}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,4{/3/!p}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2,4{/3/{p}}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2{n;d}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'n;d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '$!N;s/\n/-/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'N;N;s/\n/+/g' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 'N;N;p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed ':a;N;$!ba;s/\n/,/g' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '$!{h;d};H;x;p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1!G;h;$!d' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '1!G;h;$p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'x;$G' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'G' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 'H;${x;s/\n/ /g;p}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 'h;n;G;p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '$!N;P;D' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'N;P;D' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '$!N;$!D' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -e :a -e '$q;N;3,$D;ba' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2z' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'y/12345/abcde/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '3y/3/\n/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'y,12,\,x,' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'y/12/a/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '3a added' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '3i inserted' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '3c changed' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2,4c changed' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2,4!c changed' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '$a end' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1i\
+first\
+second' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1a\  indented' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1a one\ntwo' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -e '1a\' -e 'foo' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2{a x
+p}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '2{a x
+n}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '/3/{i\
+before
+a\
+after
+}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '3{a x
+}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed '1~2c\X' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/[0-9]/<&>/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 's/3/three/p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 's/3/three/;T;p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/3/three/;t;s/$/!/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/[24]/x/;ta;s/$/ -/;:a' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -s -n '$p' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '$p' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '1p;$p' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -s -n '1p;$p' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -s '1F' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '$=' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -s -n '$=' f f
+printf '1\n2\n3\n4\n5\n' > f; $X sed p - < f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n p nope f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n p nope
+printf '1\n2\n3\n4\n5\n' > f; $X sed
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'k' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'p;p;' f | head -4
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '2{p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n 'p}' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 'bnone' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/1/2' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/\(1/2/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed 's/1/\1/' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -n '0p' f
+printf '1\n2\n3\n4\n5\n' > f; $X sed -f /dev/null f
+printf '2p\n$d\n' > s; printf '1\n2\n3\n' > f; $X sed -f s f
+printf '2p\n$d\n' > s; printf '1\n2\n3\n' > f; $X sed -n -f s -e '1p' f
+printf '#n\n2p\n' > s; printf '1\n2\n3\n' > f; $X sed -f s f
+printf '1\n2\n3\n' > f; $X sed '#n
+2p' f
+printf '1\n2\n3\n' > f; $X sed -e '# comment' -e 2d f
+printf '1\n2\n3\n' > f; $X sed '2d # trailing' f
+printf '1\n2\n3\n' > f; $X sed -e 2d -e 3d f
+printf '1\n2\n3\n' > f; $X sed --expression=2d --quiet --expression=p f
+printf '1\n2\n3\n' > f; $X sed --silent -e p f
+printf '1\n2\n3' > f; $X sed p f
+printf '1\n2\n3' > f; $X sed -n '$p' f
+printf '1\n2\n3' > f; $X sed '$a x' f
+printf '1\n2\n3' > f; $X sed '$i x' f
+printf '1\n2\n3' > f; $X sed '$d' f
+printf '1\n2\n3' > f; $X sed 'N;s/\n/+/' f
+printf '1\n2\n3' > f; cp f g; $X sed p f g
+printf '1\n2\n3' > f; $X sed -n 'p;p' f
+printf '1\n2\n3' > f; $X sed G f
+printf '1\n2\n3' > f; $X sed '$!d;G' f
+printf '' > f; $X sed p f
+printf '' > f; $X sed -n '$p' f
+printf '\n' > f; $X sed p f
+printf 'a\n' > f; : > g; $X sed -n '$p' f g
+printf 'a\n' > f; : > g; $X sed -n '$p' g f g
+printf 'hello world\n' > f; $X sed 's/o/0/' f
+printf 'hello world\n' > f; $X sed 's/o/0/g' f
+printf 'hello world\n' > f; $X sed 's/o/0/2' f
+printf 'hello world\n' > f; $X sed 's/o/0/2g' f
+printf 'hello world\n' > f; $X sed 's/O/0/I' f
+printf 'hello world\n' > f; $X sed 's/O/0/Ig' f
+printf 'hello world\n' > f; $X sed 's/O/0/ig' f
+printf 'hello world\n' > f; $X sed 's/\(hello\) \(world\)/\2 \1/' f
+printf 'hello world\n' > f; $X sed -E 's/(hello) (world)/\2 \1/' f
+printf 'hello world\n' > f; $X sed -r 's/(hello) (world)/\2 \1/' f
+printf 'hello world\n' > f; $X sed 's/\w\+/[&]/g' f
+printf 'hello world\n' > f; $X sed -E 's/\w+/[&]/g' f
+printf 'hello world\n' > f; $X sed 's/\<./\u&/g' f
+printf 'hello world\n' > f; $X sed 's/.*/\U&/' f
+printf 'hello world\n' > f; $X sed 's/\(.\)\(.*\)/\U\1\E\2/' f
+printf 'hello world\n' > f; $X sed 's/\(.\)\(.*\)/\u\1\L\2/' f
+printf 'hello world\n' > f; $X sed 's/\(h\)\(.*\)\(d\)/\U\1\L\2\U\3/' f
+printf 'hello world\n' > f; $X sed 's/hello/\n/' f
+printf 'hello world\n' > f; $X sed 's/ /\
+/' f
+printf 'hello world\n' > f; $X sed 's/ /\t/' f
+printf 'hello world\n' > f; $X sed 's/o/\&/' f
+printf 'hello world\n' > f; $X sed 's/o/\\/' f
+printf 'hello world\n' > f; $X sed 's/o/\//' f
+printf 'hello world\n' > f; $X sed 's|o|/|g' f
+printf 'hello world\n' > f; $X sed 's,o,\,,' f
+printf 'hello world\n' > f; $X sed 's/o/&&/2' f
+printf 'hello world\n' > f; $X sed 's/^/> /' f
+printf 'hello world\n' > f; $X sed 's/$/ </' f
+printf 'hello world\n' > f; $X sed 's/^hello //;s/ world$//' f
+printf 'hello world\n' > f; $X sed 's/x*/-/g' f
+printf 'hello world\n' > f; $X sed 's/l*/-/g' f
+printf 'hello world\n' > f; $X sed 's/o*/-/2' f
+printf 'hello world\n' > f; $X sed 's/\b/|/g' f
+printf 'hello world\n' > f; $X sed 's/\B/|/g' f
+printf 'hello world\n' > f; $X sed 's/\>/|/g' f
+printf 'hello world\n' > f; $X sed 's/[aeiou]/(&)/g' f
+printf 'hello world\n' > f; $X sed 's/[^aeiou ]//g' f
+printf 'hello world\n' > f; $X sed 's/[[:space:]]\+/_/' f
+printf 'hello world\n' > f; $X sed -E 's/(l+)|(o)/<\1\2>/g' f
+printf 'hello world\n' > f; $X sed -E 's/(a)?hello/[\1]/' f
+printf 'hello world\n' > f; $X sed -E 's/l{2}/LL/' f
+printf 'hello world\n' > f; $X sed 's/l\{2\}/LL/' f
+printf 'hello world\n' > f; $X sed -E 's/o|r/0/g' f
+printf 'hello world\n' > f; $X sed -E 's/(o).*\1/X/' f
+printf 'hello world\n' > f; $X sed 's/o.*o/X/' f
+printf 'hello world\n' > f; $X sed -n '/hello/{s//bye/;p}' f
+printf 'hello world\n' > f; $X sed -n '/hello/s//bye/p' f
+printf 'hello world\n' > f; $X sed 's/o/0/w out' f; cat out
+printf 'hello world\n' > f; $X sed -n 's/o/0/gpw out' f; cat out
+printf 'hello world\n' > f; $X sed -n 'w out' f; cat out
+printf 'hello world\n' > f; $X sed 'w /dev/stdout' f
+printf 'hello world\n' > f; $X sed -n '/o/w a
+/w/w b' f; cat a b
+printf 'hello world\n' > f; printf 'R1\nR2\n' > r; $X sed 'r r' f
+printf 'hello world\n' > f; printf 'R1\nR2\n' > r; $X sed '1r r' f f
+printf 'hello world\n' > f; $X sed 'r nope' f
+printf 'hello world\n' > f; printf 'R1\nR2\n' > r; $X sed -n 'r r' f
+printf 'a\tb\\c\001\n' > f; $X sed -n l f
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > f; $X sed -n l f
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > f; $X sed -n 'l 0' f
+printf 'abcdefghij\n' > f; $X sed -n 'l 5' f
+printf 'abcdefghij\n' > f; $X sed -n -l 5 l f
+printf 'abcdefghij\n' > f; $X sed -n 'l 1' f
+printf 'abcdefghij\n' > f; $X sed -n 'l 2' f
+printf 'a\303\251b\n' > f; $X sed -n l f
+printf 'a\nb\n' > f; $X sed 'N;l' f
+printf 'a b c\n' > f; $X sed 's/ /\n/g' f
+printf 'a b c\n' > f; $X sed 's/ /\n/g;P;D' f
+printf 'a b c\n' > f; $X sed 's/ /\n/;P;D' f
+printf 'a b c\n' > f; $X sed 'N;s/\n//' f
+printf 'a\nb\nc\n' > f; $X sed 'N;s/^b/X/M' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/^/>/Mg;p' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/$/</Mg;p' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/\`a/X/M;s/c\'"'"'/Y/M;p' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/b.c/X/;p' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/[\n]/_/g;p' f
+printf 'a\nb\nc\n' > f; $X sed -n 'N;N;s/a.b/X/p' f
+printf 'a\nb\nc\n' > f; $X sed '/b/{x;p;x}' f
+printf 'a\nb\nc\n' > f; $X sed '/b/{x;p;x;G}' f
+printf 'a\nb\nc\n' > f; $X sed -n '/a/,/b/{/b/!p}' f
+printf 'a\nb\nc\n' > f; $X sed '/a/,/b/{s/$/!/}' f
+printf 'a\nb\nc\n' > f; $X sed -n '2{p;p}' f
+printf 'a\nb\nc\n' > f; $X sed '2{s/b/B/;s/B/BB/}' f
+printf 'a\nb\nc\n' > f; $X sed '{;p;}' f
+printf 'a\nb\nc\n' > f; $X sed -n '{p};{p}' f
+printf 'a\nb\nc\n' > f; $X sed -n '2!{p}' f
+printf 'a\nb\nc\n' > f; $X sed -n '2 ! p' f
+printf 'a\nb\nc\n' > f; $X sed -n '2,3 p' f
+printf 'a\nb\nc\n' > f; $X sed -n '2 , 3p' f
+printf 'a\nb\nc\n' > f; $X sed -n '2,3 !p' f
+printf 'a\nb\nc\n' > f; $X sed -n '/a/I,/B/Ip' f
+printf 'a\nb\nc\n' > f; $X sed -n '/A/Ip' f
+printf 'a\nb\nc\n' > f; $X sed -n '/\(a\|b\)/p' f
+printf 'a\nb\nc\n' > f; $X sed -nE '/(a|b)/p' f
+printf 'a\nb\nc\n' > f; $X sed -n '/a\|c/p' f
+printf 'a\nb\nc\n' > f; $X sed -n '$!p' f
+printf 'a\nb\nc\n' > f; $X sed '1d;$d' f
+printf 'a\nb\nc\n' > f; $X sed -e '/b/ba' -e 's/$/!/' -e ':a' f
+printf 'a\nb\nc\n' > f; $X sed -e ':x;s/^\(.\{1,3\}\)$/ \1/;tx' f
+printf 'a\nb\nc\n' > f; $X sed -e ':a;s/^.\{1,4\}$/ &/;ta' f
+printf 'a,b,c\n' > f; $X sed ':a;s/,/;/;ta' f
+printf 'a,b,c\n' > f; $X sed -e ':a' -e 's/,/;/' -e 'ta' f
+printf 'a,b,c\n' > f; $X sed -n 's/,/;/gp' f
+printf 'a,b,c\n' > f; $X sed 's/[^,]*$//' f
+printf 'a,b,c\n' > f; $X sed 's/^\([^,]*\),\(.*\)$/\2,\1/' f
+printf 'one two\n' > f; $X sed -E 's/(\w+) (\w+)/\2 \1/' f
+printf 'one two\n' > f; $X sed -E 's/\s+/_/' f
+printf 'one two\n' > f; $X sed -E 's/\S+/X/g' f
+printf 'one two\n' > f; $X sed -E 's/\W/_/' f
+printf 'one two\n' > f; $X sed 's/one/\x41/' f
+printf 'one two\n' > f; $X sed 's/\x6fne/1/' f
+printf 'x\n' > f; $X sed 's/x/a\
+b/' f
+printf 'x\n' > f; $X sed 's/x/[&]/;s/\[/(/;s/\]/)/' f
+printf 'x\n' > f; $X sed 's/x/\//' f
+printf 'x\n' > f; $X sed 's/x/\n\t\\/' f | od -c
+printf 'x y\n' > f; $X sed 's/\(x\) \(y\)/\2\n\1/' f
+printf 'x y\n' > f; $X sed 's/x\|y/Z/g' f
+printf 'x y\n' > f; $X sed -E 's/x|y/Z/g' f
+printf 'x y\n' > f; $X sed -E 's/x\|y/Z/g' f
+printf 'x|y\n' > f; $X sed -E 's/x\|y/Z/g' f
+printf 'x|y\n' > f; $X sed 's/x|y/Z/g' f
+printf 'x+y\n' > f; $X sed 's/x+y/Z/' f
+printf 'x+y\n' > f; $X sed 's/x\+/Z/' f
+printf 'x+y\n' > f; $X sed -E 's/x\+y/Z/' f
+printf 'x?y\n' > f; $X sed 's/x?y/Z/' f
+printf 'a.b\n' > f; $X sed 's/a\.b/Z/' f
+printf 'a.b\n' > f; $X sed 's/a[.]b/Z/' f
+printf 'a*b\n' > f; $X sed 's/a\*b/Z/' f
+printf 'a*b\n' > f; $X sed 's/*b/Z/' f
+printf 'ab\n' > f; $X sed 's/a*/X/g' f
+printf 'aab\n' > f; $X sed 's/a*/X/2' f
+printf 'abc\n' > f; $X sed 's/b*/X/g' f
+printf 'abc\n' > f; $X sed 's/\(b\)*/[\1]/g' f
+printf 'abc\n' > f; $X sed -E 's/(b|)/[\1]/g' f
+printf 'abc\n' > f; $X sed 's/$/X/g' f
+printf 'abc\n' > f; $X sed 's/^/X/g' f
+printf 'abc\n' > f; $X sed 's/^a/X/g' f
+printf 'abc\n' > f; $X sed 's/.$/X/' f
+printf 'abc\n' > f; $X sed 's/./X/3' f
+printf 'abc\n' > f; $X sed 's/./X/4' f
+printf 'abc\n' > f; $X sed -n 's/./X/3p' f
+printf 'abc\n' > f; $X sed 's/a/x/;s/b/y/;s/c/z/' f
+printf 'abc\n' > f; $X sed -e 's/a/x/' -e 's/x/y/' f
+printf 'abc\n' > f; $X sed 's/a/x/ ; s/b/y/' f
+printf 'abc\n' > f; $X sed 's/a/x/g;' f
+printf 'abc\n' > f; $X sed 's/a/x/;;s/b/y/' f
+printf 'abc\n' > f; $X sed 's/a/x/gg' f
+printf 'abc\n' > f; $X sed 's/a/x/0' f
+printf 'abc\n' > f; $X sed 's/a/x/z' f
+printf 'abc\n' > f; cp f g; $X sed -i 's/b/B/' f; cat f
+printf 'abc\n' > f; cp f g; $X sed -i.bak 's/b/B/' f; cat f f.bak
+printf 'abc\n' > f; cp f g; $X sed -i -e 's/b/B/' f g; cat f g
+printf 'abc\n' > f; cp f g; $X sed -n -i p f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i '$d' f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i 1d f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i '$!d' f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i -n '$=' f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i 1q f g; cat f g
+printf 'abc\nabd\n' > f; cp f g; $X sed -i.orig 's/a/A/' f g; cat f g f.orig g.orig
+printf 'abc\nabd\n' > f; mkdir bk; $X sed -i'bk/*.old' 's/a/A/' f; cat f bk/f.old
+printf 'abc\nabd\n' > f; $X sed --in-place=.b 's/a/A/' f; cat f f.b
+printf 'abc\nabd\n' > f; chmod 640 f; $X sed -i 's/a/A/' f; stat -c %a f
+printf 'abc\nabd\n' > f; $X sed -i 's/a/A/' nope; echo $?
+printf 'abc\nabd\n' > f; $X sed -i 's/a/A/'; echo $?
+printf 'abc\nabd\n' > f; $X sed -i 'w /dev/stdout' f; cat f
+printf 'abc\nabd' > f; $X sed -i 's/a/A/' f; od -c f
+printf 'abc\nabd\n' > f; mkdir d; $X sed -i 's/a/A/' d; echo $?
+printf 'abc\nabd\n' > f; $X sed -s -n '$p;1p' f f
+printf 'abc\nabd\n' > f; $X sed -n -s F f f
+printf 'abc\nabd\n' > f; $X sed -n F < f
+printf 'abc\nabd\n' > f; $X sed --help | head -1
+printf 'abc\nabd\n' > f; $X sed -n -e 'l;d' f
+printf 'abc\nabd\n' > f; $X sed -u p f
+printf 'abc\nabd\n' > f; $X sed --posix p f
+printf 'abc\nabd\n' > f; $X sed -n p -- f
+printf 'abc\nabd\n' > f; $X sed p -n f
+printf 'abc\nabd\n' > f; $X sed -ne 2p f
+printf 'abc\nabd\n' > f; $X sed -n -e2p f
+printf 'abc\nabd\n' > f; $X sed -nf /dev/stdin f < /dev/null
+seq 12 | sed 's/$/ foo bar/' > f; $X sed '/1/{s/1/one/;b};s/$/ other/' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed -n '/3/,/5/{=;p}' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed '3,5{s/foo/X/;n;s/bar/Y/}' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed '$!{N;N};P;D' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed '0~4{N;d}' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed -n '/2/,/4/{//!p}' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed '1~3a\
+--' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed 's/foo/a&b/;s//Q/' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed -E 's/^(.)(.)?/\2\1/' f
+seq 12 | sed 's/$/ foo bar/' > f; $X sed -n '2{n;n;p}' f
