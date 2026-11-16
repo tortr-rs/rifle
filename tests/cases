@@ -1795,3 +1795,18 @@ printf '1\n2\n3\n4\n5\n6\n7\n' | $X xargs -n3 echo
 seq 1 5000 | $X echo | wc -l
 seq 1 5000 | $X echo | wc -c
 seq 1 40000 | $X echo | wc -l
+# fmt
+printf 'a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh\n' | $X fmt -w 20
+printf 'one. two.  three\n\nnext para here\n' | $X fmt -u
+# b2sum basenc pathchk
+printf abc | $X b2sum
+printf abc | $X basenc --base32
+printf 'hello' | $X basenc --base64 | $X basenc --base64 -d
+$X pathchk -p a/b/c
+# kill dir numfmt
+$X kill -l 9
+$X numfmt --to=si 1500000
+echo 2048 | $X numfmt --to=iec
+# pr
+printf '1\n2\n3\n4\n5\n6\n' | $X pr -t -3
+printf '1\n2\n3\n' | $X pr -t -n

@@ -4580,7 +4580,9 @@ static int t_id(int argc, char **argv)
 }
 /* ---- md5sum sha*sum cksum sum ---- */
 
-enum { A_MD5, A_SHA1, A_SHA224, A_SHA256, A_SHA384, A_SHA512 };
+enum { A_MD5, A_SHA1, A_SHA224, A_SHA256, A_SHA384, A_SHA512, A_B2 };
+
+static unsigned b2bits = 512;
 
 struct hash {
     int alg;
@@ -4705,8 +4707,36 @@ static void sha512_block(struct hash *h, const unsigned char *p)
     for (i = 0; i < 8; i++) h->q[i] += v[i];
 }
 
+static const uint64_t b2iv[8] = { 0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+    0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL };
+static const unsigned char b2sigma[10][16] = {
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, { 14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3 },
+    { 11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4 }, { 7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8 },
+    { 9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13 }, { 2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9 },
+    { 12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11 }, { 13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10 },
+    { 6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5 }, { 10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0 } };
+
+static void b2_block(struct hash *h, const unsigned char *p, int last)
+{
+    uint64_t m[16], v[16];
+    int i, r;
+    for (i = 0; i < 16; i++) { int k; m[i] = 0; for (k = 7; k >= 0; k--) m[i] = m[i] << 8 | p[i * 8 + k]; }
+    for (i = 0; i < 8; i++) { v[i] = h->q[i]; v[i + 8] = b2iv[i]; }
+    v[12] ^= h->len;
+    if (last) v[14] = ~v[14];
+#define B2G(a, b, c, d, x, y) \
+    v[a] += v[b] + (x); v[d] = ROR64(v[d] ^ v[a], 32); v[c] += v[d]; v[b] = ROR64(v[b] ^ v[c], 24); \
+    v[a] += v[b] + (y); v[d] = ROR64(v[d] ^ v[a], 16); v[c] += v[d]; v[b] = ROR64(v[b] ^ v[c], 63);
+    for (r = 0; r < 12; r++) {
+        const unsigned char *s = b2sigma[r % 10];
+        B2G(0, 4, 8, 12, m[s[0]], m[s[1]]) B2G(1, 5, 9, 13, m[s[2]], m[s[3]]) B2G(2, 6, 10, 14, m[s[4]], m[s[5]]) B2G(3, 7, 11, 15, m[s[6]], m[s[7]])
+        B2G(0, 5, 10, 15, m[s[8]], m[s[9]]) B2G(1, 6, 11, 12, m[s[10]], m[s[11]]) B2G(2, 7, 8, 13, m[s[12]], m[s[13]]) B2G(3, 4, 9, 14, m[s[14]], m[s[15]])
+    }
+    for (i = 0; i < 8; i++) h->q[i] ^= v[i] ^ v[i + 8];
+}
+
 static size_t hash_bsize(int alg) { return alg >= A_SHA384 ? 128 : 64; }
-static size_t hash_size(int alg) { static const size_t n[] = { 16, 20, 28, 32, 48, 64 }; return n[alg]; }
+static size_t hash_size(int alg) { static const size_t n[] = { 16, 20, 28, 32, 48, 64 }; return alg == A_B2 ? b2bits / 8 : n[alg]; }
 
 static void hash_init(struct hash *h, int alg)
 {
@@ -4723,6 +4753,7 @@ static void hash_init(struct hash *h, int alg)
     else if (alg == A_SHA224) memcpy(h->s, i224, sizeof i224);
     else if (alg == A_SHA256) memcpy(h->s, i256, sizeof i256);
     else if (alg == A_SHA384) memcpy(h->q, i384, sizeof i384);
+    else if (alg == A_B2) { memcpy(h->q, b2iv, sizeof b2iv); h->q[0] ^= 0x01010000 ^ (b2bits / 8); }
     else memcpy(h->q, i512, sizeof i512);
 }
 
@@ -4740,6 +4771,13 @@ static void hash_add(struct hash *h, const void *data, size_t n)
 {
     const unsigned char *p = data;
     size_t bs = hash_bsize(h->alg);
+    if (h->alg == A_B2) {
+        while (n) {
+            if (h->n == 128) { h->len += 128; b2_block(h, h->buf, 0); h->n = 0; }
+            { size_t take = 128 - h->n < n ? 128 - h->n : n; memcpy(h->buf + h->n, p, take); h->n += take; p += take; n -= take; }
+        }
+        return;
+    }
     h->len += n;
     if (h->n) {
         size_t take = bs - h->n < n ? bs - h->n : n;
@@ -4755,6 +4793,14 @@ static void hash_end(struct hash *h, unsigned char *out)
 {
     size_t bs = hash_bsize(h->alg), lenbytes = bs == 128 ? 16 : 8;
     uint64_t bits = h->len * 8;
+    if (h->alg == A_B2) {
+        size_t i;
+        memset(h->buf + h->n, 0, 128 - h->n);
+        h->len += h->n;
+        b2_block(h, h->buf, 1);
+        for (i = 0; i < b2bits / 8; i++) out[i] = h->q[i / 8] >> (8 * (i % 8));
+        return;
+    }
     unsigned char pad[144];
     size_t padn = (h->n < bs - lenbytes ? bs - lenbytes - h->n : 2 * bs - lenbytes - h->n), i;
     memset(pad, 0, sizeof pad);
@@ -4790,19 +4836,33 @@ static int hash_fd(int fd, int alg, char *hex)
     return 0;
 }
 
-static const char *const alg_names[] = { "MD5", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512" };
+static const char *const alg_names[] = { "MD5", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512", "BLAKE2b" };
+
+static const char *alg_tag(int alg, char *buf)
+{
+    if (alg == A_B2 && b2bits != 512) { sprintf(buf, "BLAKE2b-%u", b2bits); return buf; }
+    return alg_names[alg];
+}
 
 static int t_digest(int argc, char **argv)
 {
     static const struct opt lo[] = { { "binary", 0, 'b' }, { "text", 0, 't' }, { "check", 0, 'c' }, { "tag", 0, 'T' }, { "quiet", 0, 'q' },
-        { "status", 0, 's' }, { "warn", 0, 'w' }, { "strict", 0, 'S' }, { "ignore-missing", 0, 'I' }, { "zero", 0, 'z' }, { "untagged", 0, 'U' }, { NULL, 0, 0 } };
-    int alg = !strcmp(prog, "md5sum") ? A_MD5 : !strcmp(prog, "sha1sum") ? A_SHA1 : !strcmp(prog, "sha224sum") ? A_SHA224 :
+        { "status", 0, 's' }, { "warn", 0, 'w' }, { "strict", 0, 'S' }, { "ignore-missing", 0, 'I' }, { "zero", 0, 'z' }, { "untagged", 0, 'U' }, { "length", 1, 'l' }, { NULL, 0, 0 } };
+    int alg = !strcmp(prog, "b2sum") ? A_B2 : !strcmp(prog, "md5sum") ? A_MD5 : !strcmp(prog, "sha1sum") ? A_SHA1 : !strcmp(prog, "sha224sum") ? A_SHA224 :
         !strcmp(prog, "sha256sum") ? A_SHA256 : !strcmp(prog, "sha384sum") ? A_SHA384 : A_SHA512;
     int c, bin = 0, check = 0, tag = 0, quiet = 0, stat_only = 0, strict = 0, ignmiss = 0, zero = 0, bad = 0, i;
     char hex[130];
     opts_reset();
-    while ((c = getopts(argc, argv, "btczw", lo)))
+    while ((c = getopts(argc, argv, alg == A_B2 ? "btczwl:" : "btczw", lo)))
         switch (c) {
+        case 'l': {
+            unsigned long n;
+            if (!parse_ulong(optarg, &n)) die(1, "invalid length: '%s'", optarg);
+            if (n > 512) { say("invalid length: '%s'", optarg); die(1, "maximum digest length for 'BLAKE2b' is 512 bits"); }
+            if (n % 8) { say("invalid length: '%s'", optarg); die(1, "length is not a multiple of 8"); }
+            b2bits = n ? n : 512;
+            break;
+        }
         case 'b': bin = 1; break; case 't': bin = 0; break; case 'c': check = 1; break; case 'T': tag = 1; break;
         case 'q': quiet = 1; break; case 's': stat_only = 1; break; case 'S': strict = 1; break; case 'I': ignmiss = 1; break;
         case 'z': zero = 1; break; default: break;
@@ -4821,7 +4881,7 @@ static int t_digest(int argc, char **argv)
                 if (esc) putchar('\\');
             }
             if (tag) {
-                printf("%s (", alg_names[alg]);
+                { char tb[24]; printf("%s (", alg_tag(alg, tb)); }
                 if (esc) { const char *s; for (s = name; *s; s++) fputs(*s == '\\' ? "\\\\" : *s == '\n' ? "\\n" : (char[]){ *s, 0 }, stdout); }
                 else fputs(name, stdout);
                 printf(") = %s", hex);
@@ -4852,19 +4912,25 @@ static int t_digest(int argc, char **argv)
                 if (!*p || *p == '#') continue;
                 {
                     int a;
-                    for (a = 0; a < 6; a++) {
-                        size_t l = strlen(alg_names[a]);
-                        if (!strncmp(p, alg_names[a], l) && p[l] == ' ' && p[l + 1] == '(') { t = a; break; }
+                    size_t l = 0;
+                    for (a = 0; a < 7; a++) {
+                        l = strlen(alg_names[a]);
+                        if (!strncmp(p, alg_names[a], l)) {
+                            if (a == A_B2 && p[l] == '-') { l += strspn(p + l + 1, "0123456789") + 1; }
+                            if (p[l] == ' ' && p[l + 1] == '(') { t = a; break; }
+                        }
                     }
-                    if (a < 6) {
+                    if (a < 7 && a == alg) {
                         char *close_p = strstr(p, ") = ");
                         if (!close_p) { improper++; continue; }
-                        name = p + strlen(alg_names[a]) + 2; *close_p = 0; want = close_p + 4;
+                        if (a == A_B2) { unsigned long nb = 512; if (p[7] == '-') nb = strtoul(p + 8, NULL, 10); if (nb > 512 || nb % 8 || !nb) { improper++; continue; } b2bits = nb; }
+                        name = p + l + 2; *close_p = 0; want = close_p + 4;
                         goto have;
                     }
                 }
                 {
                     size_t hl = strspn(p, "0123456789abcdefABCDEF");
+                    if (alg == A_B2 && hl && hl % 2 == 0 && hl <= 128 && p[hl] == ' ') b2bits = hl * 4;
                     if (hl != hash_size(alg) * 2 || p[hl] != ' ' || (p[hl + 1] != ' ' && p[hl + 1] != '*')) { improper++; continue; }
                     p[hl] = 0; want = p; name = p + hl + 2;
                 }
@@ -4992,12 +5058,15 @@ static int t_cksum(int argc, char **argv)
 
 /* ---- base64 base32 ---- */
 
+static const char *base_alpha;
+static int base_b32 = -1;
+
 static int t_base(int argc, char **argv)
 {
     static const struct opt lo[] = { { "decode", 0, 'd' }, { "wrap", 1, 'w' }, { "ignore-garbage", 0, 'i' }, { NULL, 0, 0 } };
-    int b32 = !strcmp(prog, "base32"), c, dec = 0, ign = 0, bad = 0, col = 0;
+    int b32 = base_b32 >= 0 ? base_b32 : !strcmp(prog, "base32"), c, dec = 0, ign = 0, bad = 0, col = 0;
     unsigned long wrap = 76;
-    const char *alpha = b32 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const char *alpha = base_alpha ? base_alpha : b32 ? "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     int bits = b32 ? 5 : 6, grp = b32 ? 5 : 3, outc = b32 ? 8 : 4;
     unsigned char *d;
     size_t len, i;
@@ -5029,30 +5098,230 @@ static int t_base(int argc, char **argv)
     } else {
         unsigned long long acc = 0;
         int nb = 0, pad = 0;
-        for (i = 0; i < len; i++) {
+        for (i = 0; i < len && !bad; i++) {
             const char *p;
+            int k;
             if (d[i] == '\n') continue;
-            if (d[i] == '=') { pad++; continue; }
+            if (d[i] == '=') {
+                pad++;
+                if (!nb || nb + pad > outc) { bad = 1; pad = 0; continue; }
+                if (nb + pad == outc) goto flush;
+                continue;
+            }
             p = d[i] ? strchr(alpha, d[i]) : NULL;
             if (!p || pad) { if (ign) continue; bad = 1; break; }
             acc = acc << bits | (p - alpha);
             if (++nb == outc) {
-                int k;
                 for (k = grp - 1; k >= 0; k--) putchar((acc >> (8 * k)) & 255);
                 acc = 0; nb = 0;
             }
-        }
-        if (!bad && nb) {
-            int bytes = nb * bits / 8, k, full = outc - nb;
-            if (nb * bits % 8 >= bits || (!b32 && nb == 1)) bad = 1;
-            else {
-                acc <<= full * bits;
-                for (k = grp - 1; k >= grp - bytes; k--) putchar((acc >> (8 * k)) & 255);
+            continue;
+flush:
+            {
+                int bytes = nb * bits / 8, rem = nb * bits % 8;
+                if (rem >= bits || (acc & ((1ULL << rem) - 1))) bad = 1;
+                for (k = bytes - 1; k >= 0; k--) putchar((acc >> (rem + 8 * k)) & 255);
+                acc = 0; nb = 0; pad = 0;
             }
+        }
+        if (!bad && pad) bad = 1;
+        if (nb) {
+            int bytes = nb * bits / 8, rem = nb * bits % 8, k;
+            if (rem >= bits || (acc & ((1ULL << rem) - 1))) bad = 1;
+            for (k = bytes - 1; k >= 0; k--) putchar((acc >> (rem + 8 * k)) & 255);
         }
         if (bad) { fflush(stdout); say("invalid input"); return 1; }
     }
     return finish_stdout() ? 1 : 0;
+}
+
+
+/* ---- basenc ---- */
+
+static void bn_out(unsigned long wrap, int *col, int ch)
+{
+    if (wrap && *col == (int)wrap) { putchar('\n'); *col = 0; }
+    putchar(ch);
+    (*col)++;
+}
+
+static int t_basenc(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "base64", 0, 1 }, { "base64url", 0, 2 }, { "base32", 0, 3 }, { "base32hex", 0, 4 }, { "base16", 0, 5 },
+        { "base2msbf", 0, 6 }, { "base2lsbf", 0, 7 }, { "z85", 0, 8 }, { "decode", 0, 'd' }, { "wrap", 1, 'w' }, { "ignore-garbage", 0, 'i' }, { NULL, 0, 0 } };
+    static const char z85[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+    int c, kind = 0, dec = 0, ign = 0, col = 0, fd, bad = 0;
+    unsigned long wrap = 76;
+    unsigned char *d;
+    size_t len, i;
+    opts_reset();
+    while ((c = getopts(argc, argv, "diw:", lo)))
+        switch (c) {
+        case 'd': dec = 1; break; case 'i': ign = 1; break;
+        case 'w': if (!parse_ulong(optarg, &wrap)) die(1, "invalid wrap size: '%s'", optarg); break;
+        default: if (c >= 1 && c <= 8) { kind = c; } break;
+        }
+    if (!kind) { say("missing encoding type"); usage_error(); }
+    if (nops > 1) extra_operand(ops[1]);
+    if (kind <= 4) {
+        static const char *const al[] = { NULL, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", "0123456789ABCDEFGHIJKLMNOPQRSTUV" };
+        char *nv[8];
+        int n = 0;
+        nv[n++] = argv[0];
+        if (dec) nv[n++] = "-d";
+        if (ign) nv[n++] = "-i";
+        { char w[24]; snprintf(w, sizeof w, "-w%lu", wrap); nv[n++] = strdup(w); }
+        if (nops) nv[n++] = ops[0];
+        nv[n] = NULL;
+        base_alpha = al[kind];
+        base_b32 = kind >= 3;
+        opts_reset();
+        return t_base(n, nv);
+    }
+    fd = open_input(nops ? ops[0] : "-");
+    if (fd < 0) { perr("%s", ops[0]); return 1; }
+    if (read_all(fd, (char **)&d, &len) < 0) { perr("read error"); return 1; }
+    if (!dec) {
+        if (kind == 8) {
+            if (len % 4) { say("invalid input (length must be multiple of 4 characters)"); return 1; }
+            for (i = 0; i < len; i += 4) {
+                unsigned long v = (unsigned long)d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3];
+                char t[5];
+                int k;
+                for (k = 4; k >= 0; k--) { t[k] = z85[v % 85]; v /= 85; }
+                for (k = 0; k < 5; k++) bn_out(wrap, &col, t[k]);
+            }
+        } else for (i = 0; i < len; i++) {
+            int k;
+            if (kind == 5) { static const char hx[] = "0123456789ABCDEF"; bn_out(wrap, &col, hx[d[i] >> 4]); bn_out(wrap, &col, hx[d[i] & 15]); }
+            else for (k = 0; k < 8; k++) bn_out(wrap, &col, '0' + (kind == 6 ? d[i] >> (7 - k) & 1 : d[i] >> k & 1));
+        }
+        if (col && wrap) putchar('\n');
+        return finish_stdout() ? 1 : 0;
+    }
+    {
+        unsigned long acc = 0;
+        int nb = 0, per = kind == 5 ? 2 : kind == 8 ? 5 : 8;
+        for (i = 0; i < len && !bad; i++) {
+            int v = -1;
+            unsigned char ch = d[i];
+            if (ch == '\n') continue;
+            if (kind == 5) v = isdigit(ch) ? ch - '0' : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
+            else if (kind == 8) { const char *p = ch ? strchr(z85, ch) : NULL; v = p ? p - z85 : -1; }
+            else v = ch == '0' || ch == '1' ? ch - '0' : -1;
+            if (v < 0) { if (ign) continue; bad = 1; break; }
+            if (kind == 8) acc = acc * 85 + v; else if (kind == 5) acc = acc << 4 | v; else acc = kind == 6 ? acc << 1 | v : acc | (unsigned long)v << nb;
+            if (++nb == per) {
+                if (kind == 8) { int k; for (k = 3; k >= 0; k--) putchar(acc >> (8 * k) & 255); }
+                else putchar(acc & 255);
+                acc = 0; nb = 0;
+            }
+        }
+        if (nb && !bad) bad = 1;
+        if (bad) { fflush(stdout); say("invalid input"); return 1; }
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- shred ---- */
+
+static void rnd_fill(unsigned char *b, size_t n)
+{
+    static int fd = -2;
+    size_t got = 0;
+    if (fd == -2) fd = open("/dev/urandom", O_RDONLY);
+    while (fd >= 0 && got < n) { ssize_t r = read(fd, b + got, n - got); if (r <= 0) break; got += r; }
+    while (got < n) b[got++] = (unsigned char)rand();
+}
+
+static int shred_pass(int fd, unsigned long long size, const unsigned char *pat, int plen, int rnd, int exact)
+{
+    unsigned char buf[65536];
+    unsigned long long done = 0;
+    size_t i;
+    if (lseek(fd, 0, SEEK_SET) < 0) return -1;
+    while (done < size || (!exact && done == 0 && !size)) {
+        size_t n = size - done < sizeof buf ? size - done : sizeof buf;
+        if (!n) break;
+        if (rnd) rnd_fill(buf, n); else for (i = 0; i < n; i++) buf[i] = pat[(done + i) % plen];
+        if (write(fd, buf, n) != (ssize_t)n) return -1;
+        done += n;
+    }
+    return fsync(fd);
+}
+
+static int t_shred(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "force", 0, 'f' }, { "iterations", 1, 'n' }, { "size", 1, 's' }, { "remove", 2, 'u' }, { "verbose", 0, 'v' },
+        { "exact", 0, 'x' }, { "zero", 0, 'z' }, { "random-source", 1, 1000 }, { NULL, 0, 0 } };
+    static const unsigned char pats[][3] = { { 0x55, 0x55, 0x55 }, { 0xaa, 0xaa, 0xaa }, { 0x92, 0x49, 0x24 }, { 0x49, 0x24, 0x92 }, { 0x24, 0x92, 0x49 },
+        { 0x6d, 0xb6, 0xdb }, { 0xb6, 0xdb, 0x6d }, { 0xdb, 0x6d, 0xb6 }, { 0x00, 0x00, 0x00 }, { 0xff, 0xff, 0xff }, { 0x11, 0x11, 0x11 },
+        { 0x22, 0x22, 0x22 }, { 0x33, 0x33, 0x33 }, { 0x44, 0x44, 0x44 }, { 0x66, 0x66, 0x66 }, { 0x77, 0x77, 0x77 }, { 0x88, 0x88, 0x88 },
+        { 0x99, 0x99, 0x99 }, { 0xbb, 0xbb, 0xbb }, { 0xcc, 0xcc, 0xcc }, { 0xdd, 0xdd, 0xdd }, { 0xee, 0xee, 0xee } };
+    int c, force = 0, remove_ = 0, verbose = 0, exact = 0, zero = 0, bad = 0, i;
+    unsigned long iters = 3;
+    long long fsize = -1;
+    opts_reset();
+    while ((c = getopts(argc, argv, "fn:s:uvxz", lo)))
+        switch (c) {
+        case 'f': force = 1; break; case 'v': verbose = 1; break; case 'x': exact = 1; break; case 'z': zero = 1; break; case 'u': remove_ = 1; break;
+        case 'n': if (!parse_ulong(optarg, &iters)) die(1, "invalid number of passes: '%s'", optarg); break;
+        case 's': { unsigned long n; char *e; n = strtoul(optarg, &e, 10); if (e == optarg) die(1, "invalid file size: '%s'", optarg);
+            if (*e == 'K') n *= 1024; else if (*e == 'M') n <<= 20; else if (*e == 'G') n <<= 30; else if (*e == 'k') n *= 1000; else if (*e && *e != 'c') die(1, "invalid file size: '%s'", optarg);
+            fsize = n; break; }
+        default: break;
+        }
+    if (!nops) { say("missing file operand"); usage_error(); }
+    for (i = 0; i < nops; i++) {
+        const char *f = ops[i];
+        int fd, p, total, isstd = !strcmp(f, "-");
+        struct stat st;
+        unsigned long long size;
+        if (isstd) fd = 1;
+        else {
+            fd = open(f, O_WRONLY);
+            if (fd < 0 && force && errno == EACCES) { chmod(f, 0600); fd = open(f, O_WRONLY); }
+            if (fd < 0) { say("%s: failed to open for writing: %s", f, strerror(errno)); bad = 1; continue; }
+        }
+        if (fstat(fd, &st) < 0) { perr("%s: failed to stat", f); bad = 1; continue; }
+        size = fsize >= 0 ? (unsigned long long)fsize : S_ISREG(st.st_mode) ? (unsigned long long)st.st_size : 0;
+        if (!exact && fsize < 0 && size % st.st_blksize) size += st.st_blksize - size % st.st_blksize;
+        total = iters + zero;
+        for (p = 1; p <= total; p++) {
+            int rnd = p <= (int)iters, zp = !rnd;
+            unsigned char z[3] = { 0, 0, 0 };
+            const char *label = rnd ? "random" : "000000";
+            unsigned char sel[3];
+            if (rnd && iters > 3 && p != 1 && p != (int)iters) { memcpy(sel, pats[(p * 7) % 22], 3); rnd = 0; { static char lb[8]; snprintf(lb, sizeof lb, "%02x%02x%02x", sel[0], sel[1], sel[2]); label = lb; } }
+            if (verbose) say("%s: pass %d/%d (%s)...", f, p, total, label);
+            if (shred_pass(fd, size, zp ? z : sel, 3, rnd, exact) < 0) { say("%s: error writing at offset %llu: %s", f, size, strerror(errno)); bad = 1; break; }
+        }
+        if (!isstd) close(fd);
+        if (remove_ && !isstd && !bad) {
+            char dir[PATH_MAX], *sl, nm[PATH_MAX];
+            size_t l;
+            int k;
+            if (verbose) say("%s: removing", f);
+            snprintf(dir, sizeof dir, "%s", f);
+            sl = strrchr(dir, '/');
+            if (sl) sl[1] = 0; else dir[0] = 0;
+            l = strlen(f) - (sl ? sl + 1 - dir : 0);
+            { const char *base = sl ? f + (sl + 1 - dir) : f; char cur[PATH_MAX]; snprintf(cur, sizeof cur, "%s", f);
+              for (; l > 0; l--) {
+                  snprintf(nm, sizeof nm, "%s", dir);
+                  for (k = 0; k < (int)l; k++) strcat(nm, "0");
+                  if (!rename(cur, nm)) {
+                      if (verbose) say("%s: renamed to %s", cur, nm);
+                      snprintf(cur, sizeof cur, "%s", nm);
+                  } else if (errno != EEXIST) break;
+              }
+              (void)base;
+              if (unlink(cur) < 0) { say("%s: failed to remove: %s", cur, strerror(errno)); bad = 1; }
+              else if (verbose) say("%s: removed", f); }
+        }
+    }
+    return bad;
 }
 
 /* ---- dd ---- */
@@ -6192,18 +6461,8 @@ static int t_install(int argc, char **argv)
 
 /* ---- timeout nice nohup chroot ---- */
 
-static int sig_number(const char *s)
-{
-    static const struct { const char *n; int v; } t[] = { { "HUP", 1 }, { "INT", 2 }, { "QUIT", 3 }, { "ILL", 4 }, { "TRAP", 5 }, { "ABRT", 6 }, { "BUS", 7 },
-        { "FPE", 8 }, { "KILL", 9 }, { "USR1", 10 }, { "SEGV", 11 }, { "USR2", 12 }, { "PIPE", 13 }, { "ALRM", 14 }, { "TERM", 15 }, { "CHLD", 17 },
-        { "CONT", 18 }, { "STOP", 19 }, { "TSTP", 20 }, { "TTIN", 21 }, { "TTOU", 22 }, { "EXIT", 0 }, { NULL, 0 } };
-    unsigned long v;
-    int i;
-    if (parse_ulong(s, &v)) return (int)v;
-    if (!strncmp(s, "SIG", 3)) s += 3;
-    for (i = 0; t[i].n; i++) if (!strcmp(t[i].n, s)) return t[i].v;
-    return -1;
-}
+static int sig_number(const char *s);
+
 
 static int parse_secs(const char *s, double *out)
 {
@@ -9264,101 +9523,2332 @@ static int t_xargs(int argc, char **argv)
     return status;
 }
 
+/* ---- dir vdir ---- */
+
+static int t_dir(int argc, char **argv)
+{
+    char **v = xmalloc((argc + 4) * sizeof *v);
+    int i, n = 0;
+    v[n++] = argv[0];
+    v[n++] = !strcmp(prog, "vdir") ? "-l" : "-C";
+    v[n++] = "-b";
+    for (i = 1; i < argc; i++) v[n++] = argv[i];
+    v[n] = NULL;
+    return t_ls(n, v);
+}
+
+/* ---- kill ---- */
+
+static const char *const signames[] = { NULL, "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE",
+    "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "POLL", "PWR", "SYS" };
+#define NSIGNAMES ((int)(sizeof signames / sizeof signames[0]))
+
+static int sig_number(const char *s)
+{
+    unsigned long n;
+    int i;
+    if (parse_ulong(s, &n)) return n < 65 ? (int)n : -1;
+    if (!strncasecmp(s, "SIG", 3)) s += 3;
+    for (i = 1; i < NSIGNAMES; i++) if (!strcasecmp(s, signames[i])) return i;
+    if (!strcasecmp(s, "EXIT")) return 0;
+    if (!strcasecmp(s, "IO")) return 29;
+    if (!strcasecmp(s, "CLD")) return 17;
+    if (!strcasecmp(s, "IOT")) return 6;
+    if (!strcasecmp(s, "RTMIN")) return 34;
+    if (!strcasecmp(s, "RTMAX")) return 64;
+    if (!strncasecmp(s, "RTMIN+", 6) && parse_ulong(s + 6, &n) && n < 31) return 34 + n;
+    if (!strncasecmp(s, "RTMAX-", 6) && parse_ulong(s + 6, &n) && n < 31) return 64 - n;
+    return -1;
+}
+
+static const char *sig_name(int n, char *buf)
+{
+    if (n > 0 && n < NSIGNAMES) return signames[n];
+    if (n == 34) return "RTMIN";
+    if (n == 64) return "RTMAX";
+    if (n > 34 && n < 49) { sprintf(buf, "RTMIN+%d", n - 34); return buf; }
+    if (n > 49 && n < 64) { sprintf(buf, "RTMAX-%d", 64 - n); return buf; }
+    return NULL;
+}
+
+static int t_kill(int argc, char **argv)
+{
+    int sig = SIGTERM, i = 1, bad = 0;
+    char nb[16];
+    if (argc > 1 && (!strcmp(argv[1], "-l") || !strcmp(argv[1], "--list") || !strcmp(argv[1], "-t") || !strcmp(argv[1], "--table"))) {
+        int table = argv[1][1] == 't' || argv[1][2] == 't';
+        if (argc == 2) {
+            int n, col = 0, w;
+            for (n = 1; n < 65; n++) {
+                const char *s = sig_name(n, nb);
+                if (!s) continue;
+                if (table) { printf("%2d %-8s%s", n, s, ++col % 4 ? "" : "\n"); continue; }
+                w = strlen(s) + 1;
+                if (col && col + w > 80) { putchar('\n'); col = 0; }
+                printf("%s%s", col ? " " : "", s);
+                col += w;
+            }
+            if (!table || col % 4) putchar('\n');
+            return finish_stdout() ? 1 : 0;
+        }
+        for (i = 2; i < argc; i++) {
+            int n = sig_number(argv[i]);
+            unsigned long v;
+            if (parse_ulong(argv[i], &v)) { if (v > 128) v &= 127; n = (int)v; const char *s = sig_name(n, nb); if (!s) { say("%s: invalid signal", argv[i]); bad = 1; } else puts(s); }
+            else if (n < 0) { say("%s: invalid signal", argv[i]); bad = 1; }
+            else if (table) printf("%2d %s\n", n, sig_name(n, nb));
+            else printf("%d\n", n);
+        }
+        return finish_stdout() ? 1 : bad;
+    }
+    if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) { print_usage(); return 0; }
+    if (argc > 1 && (!strcmp(argv[1], "-s") || !strcmp(argv[1], "--signal") || !strcmp(argv[1], "-n"))) {
+        if (argc < 3) { say("option requires an argument -- 's'"); usage_error(); }
+        if ((sig = sig_number(argv[2])) < 0) die(1, "invalid signal '%s'", argv[2]);
+        i = 3;
+    } else if (argc > 1 && !strncmp(argv[1], "--signal=", 9)) {
+        if ((sig = sig_number(argv[1] + 9)) < 0) die(1, "invalid signal '%s'", argv[1] + 9);
+        i = 2;
+    } else if (argc > 1 && argv[1][0] == '-' && argv[1][1] && strcmp(argv[1], "--")) {
+        if ((sig = sig_number(argv[1] + 1)) < 0) die(1, "invalid signal '%s'", argv[1] + 1);
+        i = 2;
+    }
+    if (i < argc && !strcmp(argv[i], "--")) i++;
+    if (i >= argc) { say("not enough arguments"); usage_error(); }
+    for (; i < argc; i++) {
+        long pid;
+        char *end;
+        errno = 0;
+        pid = strtol(argv[i], &end, 10);
+        if (!*argv[i] || *end) { say("failed to parse argument: '%s'", argv[i]); bad = 1; continue; }
+        if (kill((pid_t)pid, sig) < 0) { say("(%ld): %s", pid, strerror(errno)); bad = 1; }
+    }
+    return bad;
+}
+
+/* ---- pathchk ---- */
+
+static int t_pathchk(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "portability", 0, 'P' }, { NULL, 0, 0 } };
+    int c, posix = 0, extra = 0, bad = 0, i;
+    opts_reset();
+    while ((c = getopts(argc, argv, "pP", lo)))
+        switch (c) { case 'p': posix = 1; break; case 'P': extra = 1; break; case 'P' + 1: break; default: break; }
+    if (!nops) { say("missing operand"); usage_error(); }
+    for (i = 0; i < nops; i++) {
+        const char *path = ops[i], *p, *start;
+        size_t plen = strlen(path), maxpath = posix ? 256 : PATH_MAX, maxname = posix ? 14 : 255;
+        int ok = 1;
+        if (extra || posix) {
+            if (!plen) { say("empty file name"); bad = 1; continue; }
+        }
+        if (!extra && !posix && !plen) { say("'': No such file or directory"); bad = 1; continue; }
+        if (plen >= maxpath || (posix && plen > 255)) {
+            say("limit %lu exceeded by length %lu of file name '%s'", (unsigned long)(posix ? 255 : maxpath - 1), (unsigned long)plen, path);
+            bad = 1; continue;
+        }
+        if (extra) {
+            for (p = path; *p; p++) if (*p == '-' && (p == path || p[-1] == '/')) { say("leading '-' in a component of file name '%s'", path); ok = 0; break; }
+            if (!ok) { bad = 1; continue; }
+        }
+        for (start = p = path; ok; p++) {
+            if (*p == '/' || !*p) {
+                size_t l = p - start;
+                if (l > maxname) { say("limit %lu exceeded by length %lu of file name component '%.*s'", (unsigned long)maxname, (unsigned long)l, (int)l, start); ok = 0; break; }
+                if (!*p) break;
+                start = p + 1;
+            } else if (posix || extra) {
+                if (!(isalnum((unsigned char)*p) || strchr("._-", *p))) { say("non-portable character '%c' in file name '%s'", *p, path); ok = 0; }
+            }
+        }
+        if (!ok) bad = 1;
+    }
+    return bad;
+}
+
+/* ---- who users pinky uptime ---- */
+
+enum { UT_EMPTY, UT_RUN_LVL, UT_BOOT_TIME, UT_NEW_TIME, UT_OLD_TIME, UT_INIT, UT_LOGIN, UT_USER, UT_DEAD, UT_ACCT };
+
+struct ut { int type, pid, term, exit; long sec; char line[33], id[5], user[33], host[257]; };
+
+static int ut_read(const char *file, struct ut **out)
+{
+    unsigned char rec[384];
+    struct ut *v = NULL;
+    int n = 0, fd = open(file ? file : "/var/run/utmp", O_RDONLY);
+    if (fd < 0 && !file) fd = open("/run/utmp", O_RDONLY);
+    if (fd < 0) { perr("%s", file ? file : "/var/run/utmp"); return -1; }
+    while (read(fd, rec, sizeof rec) == (ssize_t)sizeof rec) {
+        struct ut *u;
+        int32_t i32;
+        int16_t i16;
+        v = xrealloc(v, (n + 1) * sizeof *v);
+        u = &v[n++];
+        memset(u, 0, sizeof *u);
+        memcpy(&i16, rec, 2); u->type = i16;
+        memcpy(&i32, rec + 4, 4); u->pid = i32;
+        memcpy(u->line, rec + 8, 32); memcpy(u->id, rec + 40, 4); memcpy(u->user, rec + 44, 32); memcpy(u->host, rec + 76, 256);
+        memcpy(&i16, rec + 332, 2); u->term = i16;
+        memcpy(&i16, rec + 334, 2); u->exit = i16;
+        memcpy(&i32, rec + 340, 4); u->sec = i32;
+    }
+    close(fd);
+    *out = v;
+    return n;
+}
+
+/* a login that has no process left is stale, the way gnulib's read_utmp drops it */
+static int ut_alive(const struct ut *u)
+{
+    return u->pid <= 0 || kill(u->pid, 0) == 0 || errno != ESRCH;
+}
+static int ut_isuser(const struct ut *u) { return u->user[0] && u->type == UT_USER && ut_alive(u); }
+
+static int ut_cmp_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static int t_users(int argc, char **argv)
+{
+    struct ut *v;
+    char **names;
+    int n, i, k = 0;
+    opts_reset();
+    while (getopts(argc, argv, "", NULL)) ;
+    if (nops > 1) extra_operand(ops[1]);
+    if ((n = ut_read(nops ? ops[0] : NULL, &v)) < 0) return 1;
+    names = xmalloc((n + 1) * sizeof *names);
+    for (i = 0; i < n; i++) if (v[i].type == UT_USER && v[i].user[0] && (nops || ut_alive(&v[i]))) names[k++] = v[i].user;
+    qsort(names, k, sizeof *names, ut_cmp_name);
+    for (i = 0; i < k; i++) printf("%s%s", i ? " " : "", names[i]);
+    if (k) putchar('\n');
+    return finish_stdout() ? 1 : 0;
+}
+
+static void ut_time(long sec, char *buf, size_t cap)
+{
+    time_t t = sec;
+    strftime(buf, cap, "%b %e %H:%M", localtime(&t));
+}
+
+/* whether the tty takes messages, and how long since it was touched */
+static void ut_tty(const char *line, char *mesg, long *idle)
+{
+    char path[64];
+    struct stat st;
+    snprintf(path, sizeof path, "/dev/%s", line);
+    if (stat(path, &st) < 0) { *mesg = '?'; *idle = -1; return; }
+    *mesg = st.st_mode & S_IWGRP ? '+' : '-';
+    *idle = time(NULL) - st.st_atime;
+}
+
+struct whocols { int mesg, idle, pid, exit; };
+
+static void who_row(const struct whocols *c, char mesg, const char *user, const char *line, long sec, const char *idle, int pid, const char *comment)
+{
+    char buf[600], tm[32];
+    int n = snprintf(buf, sizeof buf, "%-8s", user);
+    if (c->mesg) n += snprintf(buf + n, sizeof buf - n, " %c", mesg);
+    ut_time(sec, tm, sizeof tm);
+    n += snprintf(buf + n, sizeof buf - n, " %-12s %s", line, tm);
+    if (c->idle) n += snprintf(buf + n, sizeof buf - n, " %-6s", idle);
+    if (c->pid) {
+        if (pid > 0) n += snprintf(buf + n, sizeof buf - n, " %10d", pid);
+        else n += snprintf(buf + n, sizeof buf - n, " %10s", "");
+    }
+    if (*comment) n += snprintf(buf + n, sizeof buf - n, " %s", comment);
+    while (n > 0 && buf[n - 1] == ' ') buf[--n] = 0;
+    puts(buf);
+}
+
+static int t_who(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "all", 0, 'a' }, { "boot", 0, 'b' }, { "dead", 0, 'd' }, { "heading", 0, 'H' }, { "login", 0, 'l' }, { "lookup", 0, 1000 },
+        { "only-current-tty", 0, 'm' }, { "process", 0, 'p' }, { "count", 0, 'q' }, { "runlevel", 0, 'r' }, { "short", 0, 's' }, { "time", 0, 't' },
+        { "mesg", 0, 'T' }, { "message", 0, 'T' }, { "writable", 0, 'T' }, { "users", 0, 'u' }, { "ips", 0, 1001 }, { NULL, 0, 0 } };
+    int c, all = 0, boot = 0, dead = 0, head = 0, login = 0, cur = 0, proc = 0, count = 0, runl = 0, tim = 0, mesg = 0, users = 0, i, n, sel;
+    struct whocols col;
+    struct ut *v;
+    const char *file = NULL, *me = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, "abdHlmpqrstTuw", lo)))
+        switch (c) {
+        case 'a': all = 1; break; case 'b': boot = 1; break; case 'd': dead = 1; break; case 'H': head = 1; break; case 'l': login = 1; break;
+        case 'm': cur = 1; break; case 'p': proc = 1; break; case 'q': count = 1; break; case 'r': runl = 1; break; case 't': tim = 1; break;
+        case 'T': mesg = 1; break; case 'u': users = 1; break; default: break;
+        }
+    if (all) boot = dead = login = proc = runl = tim = mesg = users = 1;
+    if (nops == 2 && !strcasecmp(ops[0], "am") && !strcasecmp(ops[1], "i")) { cur = 1; nops = 0; }
+    else if (nops > 1) extra_operand(ops[1]);
+    if (nops) file = ops[0];
+    sel = boot || dead || login || proc || runl || tim;
+    if ((n = ut_read(file, &v)) < 0) return 1;
+    if (cur) { const char *t = ttyname(0); if (!t || strncmp(t, "/dev/", 5)) return 0; me = t + 5; }
+    if (count) {
+        int k = 0;
+        for (i = 0; i < n; i++) if (v[i].type == UT_USER && v[i].user[0] && (file || ut_alive(&v[i]))) { printf("%s%s", k ? " " : "", v[i].user); k++; }
+        printf("%s# users=%d\n", k ? "\n" : "", k);
+        return finish_stdout() ? 1 : 0;
+    }
+    col.mesg = mesg;
+    col.idle = users || dead || login || runl;
+    col.pid = users || sel;
+    col.exit = dead;
+    if (head) {
+        char buf[200];
+        int m = snprintf(buf, sizeof buf, "%-8s", "NAME");
+        if (col.mesg) m += snprintf(buf + m, sizeof buf - m, "  ");
+        m += snprintf(buf + m, sizeof buf - m, " %-12s %-12s", "LINE", "TIME");
+        if (col.idle) m += snprintf(buf + m, sizeof buf - m, " %-6s", "IDLE");
+        if (col.pid) m += snprintf(buf + m, sizeof buf - m, " %10s", "PID");
+        m += snprintf(buf + m, sizeof buf - m, " COMMENT");
+        if (col.exit) snprintf(buf + m, sizeof buf - m, "  EXIT");
+        puts(buf);
+    }
+    for (i = 0; i < n; i++) {
+        struct ut *u = &v[i];
+        char comment[300] = "", idle[16] = "", name[40], m = ' ';
+        long id = -1;
+        if (me && strcmp(u->line, me)) continue;
+        switch (u->type) {
+        case UT_USER:
+            if (sel && !users) continue;
+            if (!u->user[0] || (!file && !ut_alive(u))) continue;
+            ut_tty(u->line, &m, &id);
+            if (!mesg) m = ' ';
+            if (col.idle) { if (id < 0) strcpy(idle, "  ?"); else if (id < 60) strcpy(idle, "  .  "); else if (id < 24 * 3600) snprintf(idle, sizeof idle, "%02ld:%02ld", id / 3600, id / 60 % 60); else strcpy(idle, " old "); }
+            if (u->host[0]) snprintf(comment, sizeof comment, "(%s)", u->host);
+            who_row(&col, m, u->user, u->line, u->sec, idle, col.pid ? u->pid : 0, comment);
+            break;
+        case UT_BOOT_TIME: if (boot) who_row(&col, ' ', "", "system boot", u->sec, "", 0, ""); break;
+        case UT_RUN_LVL:
+            if (!runl) break;
+            snprintf(name, sizeof name, "run-level %c", u->pid & 255 ? u->pid & 255 : ' ');
+            snprintf(comment, sizeof comment, "last=%c", u->pid >> 8 & 255 ? u->pid >> 8 & 255 : 'S');
+            who_row(&col, ' ', "", name, u->sec, "", 0, comment);
+            break;
+        case UT_LOGIN: if (login) { snprintf(comment, sizeof comment, "id=%s", u->id); who_row(&col, ' ', "LOGIN", u->line, u->sec, "", u->pid, comment); } break;
+        case UT_INIT: if (proc) { snprintf(comment, sizeof comment, "id=%s", u->id); who_row(&col, ' ', "", u->line, u->sec, "", u->pid, comment); } break;
+        case UT_DEAD: if (dead) { snprintf(comment, sizeof comment, "id=%-4s  term=%d exit=%d", u->id, u->term, u->exit); who_row(&col, ' ', "", u->line, u->sec, "", u->pid, comment); } break;
+        case UT_NEW_TIME: if (tim) who_row(&col, ' ', "", "new time", u->sec, "", 0, ""); break;
+        case UT_OLD_TIME: if (tim) who_row(&col, ' ', "", "old time", u->sec, "", 0, ""); break;
+        default: break;
+        }
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+static int t_pinky(int argc, char **argv)
+{
+    int c, longf = 0, nohead = 0, noname = 0, nohost = 0, noidle = 0, nodir = 0, i, n, m;
+    struct ut *v;
+    char hdr[200];
+    opts_reset();
+    while ((c = getopts(argc, argv, "lbhpswfiq", NULL)))
+        switch (c) {
+        case 'l': longf = 1; break; case 'f': nohead = 1; break; case 'b': nodir = 1; break; case 'w': noname = 1; break;
+        case 'i': noname = nohost = 1; break; case 'q': noname = nohost = noidle = 1; break; default: break;
+        }
+    if (longf) {
+        if (!nops) { say("no username specified; at least one must be specified when using -l"); usage_error(); }
+        for (i = 0; i < nops; i++) {
+            struct passwd *p = getpwnam(ops[i]);
+            char name[128], *comma;
+            if (!p) { printf("Login name: %-28sIn real life:  ???\n", ops[i]); continue; }
+            snprintf(name, sizeof name, "%s", p->pw_gecos ? p->pw_gecos : "");
+            if ((comma = strchr(name, ','))) *comma = 0;
+            printf("Login name: %-28sIn real life:  %s\n", p->pw_name, name);
+            if (!nodir) printf("Directory: %-29sShell:  %s\n", p->pw_dir, p->pw_shell);
+            putchar('\n');
+        }
+        return finish_stdout() ? 1 : 0;
+    }
+    if ((n = ut_read(NULL, &v)) < 0) return 1;
+    if (!nohead) {
+        m = snprintf(hdr, sizeof hdr, "%-8s", "Login");
+        if (!noname) m += snprintf(hdr + m, sizeof hdr - m, " %-19s", "Name");
+        m += snprintf(hdr + m, sizeof hdr - m, "  %-8s", "TTY");
+        if (!noidle) m += snprintf(hdr + m, sizeof hdr - m, " %-6s", "Idle");
+        m += snprintf(hdr + m, sizeof hdr - m, " %-12s", "When");
+        if (!nohost) snprintf(hdr + m, sizeof hdr - m, " Where");
+        puts(hdr);
+    }
+    for (i = 0; i < n; i++) {
+        struct ut *u = &v[i];
+        struct passwd *p;
+        char real[128] = "", tm[32], m1, idle[16] = "", line[600];
+        long id;
+        int len, j, want = nops == 0;
+        if (!ut_isuser(u)) continue;
+        for (j = 0; j < nops; j++) if (!strncmp(ops[j], u->user, 32)) want = 1;
+        if (!want) continue;
+        if ((p = getpwnam(u->user)) && p->pw_gecos) {
+            char *comma;
+            snprintf(real, sizeof real, "%s", p->pw_gecos);
+            if ((comma = strchr(real, ','))) *comma = 0;
+        }
+        ut_tty(u->line, &m1, &id);
+        if (id >= 60) { if (id < 24 * 3600) snprintf(idle, sizeof idle, "%02ld:%02ld", id / 3600, id / 60 % 60); else strcpy(idle, "old"); }
+        ut_time(u->sec, tm, sizeof tm);
+        len = snprintf(line, sizeof line, "%-8s", u->user);
+        if (!noname) len += snprintf(line + len, sizeof line - len, " %-19.19s", real);
+        len += snprintf(line + len, sizeof line - len, " %c%-8s", m1 == '+' ? ' ' : '*', u->line);
+        if (!noidle) len += snprintf(line + len, sizeof line - len, " %-6s", idle);
+        len += snprintf(line + len, sizeof line - len, " %s", tm);
+        if (!nohost && u->host[0]) len += snprintf(line + len, sizeof line - len, " %s", u->host);
+        while (len > 0 && line[len - 1] == ' ') line[--len] = 0;
+        puts(line);
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+static int t_uptime(int argc, char **argv)
+{
+    struct ut *v;
+    FILE *f;
+    double la[3] = { 0, 0, 0 }, up = 0;
+    long secs, days, hours, mins;
+    int users = 0, n, i;
+    time_t now = time(NULL);
+    struct tm *tm;
+    char buf[160];
+    int len;
+    opts_reset();
+    while (getopts(argc, argv, "", NULL)) ;
+    if (nops > 1) extra_operand(ops[1]);
+    if ((n = ut_read(nops ? ops[0] : NULL, &v)) < 0 && nops) return 1;
+    for (i = 0; i < n; i++) if (ut_isuser(&v[i])) users++;
+    if (nops) { for (i = 0; i < n; i++) if (v[i].type == UT_BOOT_TIME) up = now - v[i].sec; }
+    else if ((f = fopen("/proc/uptime", "r"))) { { char l[64]; up = fgets(l, sizeof l, f) ? strtod(l, NULL) : 0; } fclose(f); }
+    if ((f = fopen("/proc/loadavg", "r"))) { { char l[96], *e = l; if (fgets(l, sizeof l, f)) { int k; for (k = 0; k < 3; k++) { la[k] = strtod(e, &e); } } } fclose(f); }
+    tm = localtime(&now);
+    secs = (long)up; days = secs / 86400; hours = secs % 86400 / 3600; mins = secs % 3600 / 60;
+    len = snprintf(buf, sizeof buf, " %2d:%02d:%02d up ", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    if (days > 0) len += snprintf(buf + len, sizeof buf - len, "%ld day%s, ", days, days == 1 ? "" : "s");
+    if (days || hours) len += snprintf(buf + len, sizeof buf - len, "%2ld:%02ld", hours, mins);
+    else len += snprintf(buf + len, sizeof buf - len, "%ld min", mins);
+    snprintf(buf + len, sizeof buf - len, ",  %d user%s,  load average: %.2f, %.2f, %.2f", users, users == 1 ? "" : "s", la[0], la[1], la[2]);
+    puts(buf);
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- stdbuf ---- */
+
+static int stdbuf_mode(const char *s, const char *name, char *out, size_t cap)
+{
+    char *end;
+    unsigned long long v;
+    if (!strcmp(s, "L")) { if (name[0] == 'i') return -1; snprintf(out, cap, "L"); return 0; }
+    errno = 0;
+    v = strtoull(s, &end, 10);
+    if (end == s || errno) return -1;
+    if (*end) {
+        static const char suf[] = "KMGTPEZY";
+        const char *p;
+        int b = 1024;
+        if (end[1] == 'B' && !end[2]) b = 1000, end++;
+        else if (end[1]) return -1;
+        else if (end[0] == 'B') { end++; goto done; }
+        if (!(p = strchr(suf, *end)) || !*end) return -1;
+        { int k; for (k = 0; k <= p - suf; k++) v *= b; }
+    }
+done:
+    snprintf(out, cap, "%llu", v);
+    return 0;
+}
+
+static int t_stdbuf(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "input", 1, 'i' }, { "output", 1, 'o' }, { "error", 1, 'e' }, { NULL, 0, 0 } };
+    static const char *const libs[] = { "/usr/libexec/coreutils/libstdbuf.so", "/usr/lib/coreutils/libstdbuf.so", "/usr/local/libexec/coreutils/libstdbuf.so", NULL };
+    int c, i;
+    char val[32], preload[PATH_MAX + 32];
+    const char *lib = NULL, *old;
+    opts_reset();
+    while ((c = getopts(argc, argv, "+i:o:e:", lo))) {
+        const char *var = c == 'i' ? "_STDBUF_I" : c == 'o' ? "_STDBUF_O" : c == 'e' ? "_STDBUF_E" : NULL;
+        if (!var) continue;
+        if (stdbuf_mode(optarg, c == 'i' ? "input" : c == 'o' ? "output" : "error", val, sizeof val) < 0) die(125, "invalid mode '%s'", optarg);
+        setenv(var, val, 1);
+        i = 1;
+    }
+    if (!nops) { say("missing operand"); usage_status = 125; usage_error(); }
+    for (i = 0; libs[i]; i++) if (!access(libs[i], R_OK)) { lib = libs[i]; break; }
+    if (!lib) die(125, "failed to find libstdbuf.so");
+    old = getenv("LD_PRELOAD");
+    snprintf(preload, sizeof preload, "%s%s%s", old ? old : "", old ? ":" : "", lib);
+    setenv("LD_PRELOAD", preload, 1);
+    execvp(ops[0], ops);
+    say("failed to run command '%s': %s", ops[0], strerror(errno));
+    return errno == ENOENT ? 127 : 126;
+}
+
+/* ---- chcon runcon ---- */
+
+static int t_runcon(int argc, char **argv)
+{
+    opts_reset();
+    while (getopts(argc, argv, "+", NULL)) ;
+    if (!nops) { say("missing operand"); usage_status = 125; usage_error(); }
+    die(125, "runcon may be used only on a SELinux kernel");
+}
+
+static int t_chcon(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "reference", 1, 1003 }, { "recursive", 0, 'R' }, { "verbose", 0, 'v' }, { "user", 1, 'u' }, { "role", 1, 'l' },
+        { "type", 1, 't' }, { "range", 1, 'z' }, { "no-dereference", 0, 'h' }, { "dereference", 0, 1000 }, { "preserve-root", 0, 1001 }, { "no-preserve-root", 0, 1002 }, { NULL, 0, 0 } };
+    int c, i, first = 0, parts = 0, bad = 0;
+    const char *ref = NULL, *ctx = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, "RHLPhvu:r:l:t:", lo)))
+        switch (c) { case 'u': case 'l': case 't': case 'z': parts = 1; break; default: break; }
+    (void)ref;
+    if (!parts) first = 1;
+    if (!parts && nops < 2) { if (!nops) missing_operand(); say("missing operand after '%s'", ops[0]); usage_error(); }
+    if (parts && !nops) missing_operand();
+    if (!parts) ctx = ops[0];
+    for (i = first; i < nops; i++) {
+        say("failed to change context of '%s' to '%s': Operation not supported", ops[i], ctx ? ctx : "");
+        bad = 1;
+    }
+    return bad;
+}
+
+/* ---- csplit ---- */
+
+struct cspat { int kind; /* 0 line, 1 regex, 2 skip */ long n, off, rep; int inf; struct regex *re; char *text; };
+
+static char **cs_names;
+static int cs_nfiles;
+static const char *cs_prefix = "xx", *cs_fmt = "%02d";
+static int cs_keep, cs_quiet, cs_elide, cs_suppress, cs_open_fail;
+static char *cs_sizes;
+static size_t cs_nsz;
+
+static char *cs_name(int n)
+{
+    char *b = xmalloc(strlen(cs_prefix) + 64), *p;
+    strcpy(b, cs_prefix);
+    p = b + strlen(b);
+    snprintf(p, 64, cs_fmt, n);
+    return b;
+}
+
+static char cs_conv(const char *f)
+{
+    int n = 0;
+    char last = 0;
+    for (; *f; f++) {
+        if (*f != '%') continue;
+        if (f[1] == '%') { f++; continue; }
+        f++;
+        while (strchr("#0+- '", *f)) f++;
+        while (isdigit((unsigned char)*f)) f++;
+        if (*f == '.') { f++; while (isdigit((unsigned char)*f)) f++; }
+        if (!*f) die(1, "missing conversion specifier in suffix");
+        if (!strchr("diuoxX", *f)) die(1, "invalid conversion specifier in suffix: %c", *f);
+        if (++n > 1) die(1, "too many %% conversion specifications in suffix");
+        last = *f;
+    }
+    if (!n) die(1, "missing conversion specifier in suffix");
+    return last;
+}
+
+/* write lines [from, to) as the next file, a size line for it unless -s */
+static int cs_write(const char *buf, const long *ls, long from, long to, long total)
+{
+    size_t a = from < total ? ls[from] : ls[total], b = to < total ? ls[to] : ls[total], len = b - a;
+    char *name;
+    int fd;
+    if (cs_elide && !len) return 0;
+    name = cs_name(cs_nfiles);
+    fd = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) { say("%s: %s", name, strerror(errno)); cs_open_fail = 1; return -1; }
+    if (len && write(fd, buf + a, len) != (ssize_t)len) { say("write error for '%s': %s", name, strerror(errno)); close(fd); return -1; }
+    close(fd);
+    cs_names = xrealloc(cs_names, (cs_nfiles + 1) * sizeof *cs_names);
+    cs_names[cs_nfiles++] = name;
+    if (!cs_quiet) { char t[32]; snprintf(t, sizeof t, "%zu\n", len); cs_sizes = xrealloc(cs_sizes, cs_nsz + strlen(t) + 1); strcpy(cs_sizes + cs_nsz, t); cs_nsz += strlen(t); }
+    return 0;
+}
+
+static void cs_cleanup(void)
+{
+    int i;
+    if (!cs_keep) for (i = 0; i < cs_nfiles; i++) unlink(cs_names[i]);
+}
+
+static int t_csplit(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "suffix-format", 1, 'b' }, { "prefix", 1, 'f' }, { "keep-files", 0, 'k' }, { "digits", 1, 'n' }, { "quiet", 0, 's' },
+        { "silent", 0, 's' }, { "elide-empty-files", 0, 'z' }, { "suppress-matched", 0, 1000 }, { NULL, 0, 0 } };
+    int c, i, np = 0, fd, ndig = 2, havefmt = 0;
+    struct cspat *pats = NULL;
+    char *buf;
+    size_t len, k;
+    long *ls, total = 0, cur = 0, lastmatch = -1, prevn = 0, p, rep;
+    int skipfail = 0;
+    const char *file;
+    opts_reset();
+    while ((c = getopts(argc, argv, "b:f:kn:sqz", lo)))
+        switch (c) {
+        case 'b': cs_fmt = optarg; havefmt = 1; break; case 'f': cs_prefix = optarg; break; case 'k': cs_keep = 1; break;
+        case 'n': { unsigned long n; if (!parse_ulong(optarg, &n)) die(1, "%s: invalid number", optarg); ndig = n; break; }
+        case 's': case 'q': cs_quiet = 1; break; case 'z': cs_elide = 1; break; case 1000: cs_suppress = 1; break; default: break;
+        }
+    if (!nops) { say("missing operand"); usage_error(); }
+    if (nops < 2) { say("missing operand after '%s'", ops[0]); usage_error(); }
+    file = ops[0];
+    if (havefmt) cs_conv(cs_fmt);
+    else { char *f = xmalloc(24); snprintf(f, 24, "%%0%ud", ndig); cs_fmt = f; }
+    for (i = 1; i < nops; i++) {
+        const char *s = ops[i];
+        struct cspat *pt;
+        if (*s == '{') {
+            char *e;
+            struct cspat *prev = np ? &pats[np - 1] : NULL;
+            if (!prev || prev->rep || prev->inf) die(1, "'%s': invalid pattern", s);
+            if (!strcmp(s, "{*}")) { prev->inf = 1; continue; }
+            prev->rep = strtol(s + 1, &e, 10);
+            if (e == s + 1 || *e != '}' || e[1]) die(1, "'%.*s'}: integer required between '{' and '}'", (int)strlen(s) - 1, s);
+            continue;
+        }
+        pats = xrealloc(pats, (np + 1) * sizeof *pats);
+        pt = &pats[np++];
+        memset(pt, 0, sizeof *pt);
+        pt->text = (char *)s;
+        if (*s == '/' || *s == '%') {
+            char d = *s, *e = strrchr(s + 1, d), *tail;
+            struct rnode *nd;
+            if (!e) die(1, "%s: closing delimiter '%c' missing", s, d);
+            pt->kind = d == '/' ? 1 : 2;
+            tail = e + 1;
+            if (*tail == '+' || *tail == '-') {
+                char *q;
+                pt->off = strtol(tail, &q, 10);
+                if (*q || q == tail + 1) die(1, "'%s': integer expected after delimiter", s);
+            } else if (*tail) die(1, "'%s': integer expected after delimiter", s);
+            pt->re = re_new(0);
+            nd = re_parse(pt->re, s + 1, e - s - 1, 0, 0);
+            re_finish(pt->re, nd);
+        } else if (isdigit((unsigned char)*s)) {
+            char *e;
+            pt->n = strtol(s, &e, 10);
+            if (*e) die(1, "'%s': invalid pattern", s);
+            if (!pt->n) die(1, "%s: line number must be greater than zero", s);
+            if (pt->n < prevn) die(1, "line number '%s' is smaller than preceding line number, %ld", s, prevn);
+            if (pt->n == prevn) say("warning: line number '%s' is the same as preceding line number", s);
+            prevn = pt->n;
+        } else die(1, "'%s': invalid pattern", s);
+    }
+    fd = open_input(file);
+    if (fd < 0) { say("cannot open '%s' for reading: %s", file, strerror(errno)); return 1; }
+    if (read_all(fd, &buf, &len) < 0) { perr("read error"); return 1; }
+    ls = xmalloc((len + 2) * sizeof *ls);
+    for (k = 0; k < len; ) {
+        const char *nl = memchr(buf + k, '\n', len - k);
+        ls[total++] = k;
+        k = nl ? (size_t)(nl - buf) + 1 : len;
+    }
+    ls[total] = len;
+    for (p = 0; p < np; p++) {
+        struct cspat *pt = &pats[p];
+        long nrep = pt->inf ? -1 : pt->rep;
+        skipfail = pt->kind == 2;
+        for (rep = 0; nrep < 0 || rep <= nrep; rep++) {
+            long split;
+            const char *what = pt->text;
+            char where[64];
+            where[0] = 0;
+            if (rep) snprintf(where, sizeof where, " on repetition %ld", rep);
+            if (pt->kind == 0) {
+                long target = pt->n * (rep + 1);
+                if (target > total || target < 1) { say("'%s': line number out of range%s", what, where); goto fail_rest; }
+                split = target - 1;
+                if (split < cur) { say("'%s': line number out of range%s", what, where); goto fail_rest; }
+                if (cs_write(buf, ls, cur, split, total) < 0) goto fail_rest;
+                cur = split; lastmatch = -1;
+                if (cs_suppress && cur < total) cur++;
+            } else {
+                long m = -1, start = cur > lastmatch + 1 ? cur : lastmatch + 1, j;
+                for (j = start; j < total; j++) {
+                    size_t l = ls[j + 1] - ls[j];
+                    if (l && buf[ls[j] + l - 1] == '\n') l--;
+                    if (re_exec(pt->re, buf + ls[j], l, 0, 0, NULL)) { m = j; break; }
+                }
+                if (m < 0) {
+                    if (pt->inf && rep) goto done_inf;
+                    say("'%s': match not found%s", what, where);
+                    goto fail_rest;
+                }
+                split = m + pt->off;
+                if (split < cur) { say("'%s': line number out of range%s", what, where); cur = total; goto fail_rest; }
+                if (split > total) { say("'%s': line number out of range%s", what, where); goto fail_rest; }
+                if (pt->kind == 1) { if (cs_write(buf, ls, cur, split, total) < 0) goto fail_rest; }
+                cur = split; lastmatch = m;
+                if (cs_suppress && pt->kind == 1 && cur < total) cur++;
+            }
+        }
+        continue;
+done_inf:
+        goto finish;
+    }
+finish:
+    if (cs_write(buf, ls, cur, total, total) < 0) { cs_cleanup(); return 1; }
+    if (cs_sizes) fputs(cs_sizes, stdout);
+    return finish_stdout() ? 1 : 0;
+fail_rest:
+    if (!skipfail) cs_write(buf, ls, cur, total, total);
+    if (cs_sizes) fputs(cs_sizes, stdout);
+    cs_cleanup();
+    finish_stdout();
+    return 1;
+}
+
+/* ---- numfmt ---- */
+
+enum { NF_NONE, NF_SI, NF_IEC, NF_IECI, NF_AUTO };
+enum { RD_UP, RD_DOWN, RD_FROM_ZERO, RD_TOWARDS_ZERO, RD_NEAREST };
+enum { IV_ABORT, IV_FAIL, IV_WARN, IV_IGNORE };
+
+static int nf_term = '\n', nf_from, nf_to, nf_round = RD_FROM_ZERO, nf_invalid, nf_pad, nf_haspad, nf_zeroflag, nf_left, nf_fw, nf_hasfw, nf_prec = -1, nf_status;
+static double nf_fromunit = 1, nf_tounit = 1;
+static const char *nf_suffix = "", *nf_fpre = "", *nf_fpost = "";
+
+static const char nf_letters[] = "KMGTPEZYRQ";
+
+static double nf_rnd(double x)
+{
+    switch (nf_round) {
+    case RD_UP: return ceil(x);
+    case RD_DOWN: return floor(x);
+    case RD_FROM_ZERO: return x < 0 ? floor(x) : ceil(x);
+    case RD_TOWARDS_ZERO: return x < 0 ? ceil(x) : floor(x);
+    default: return x < 0 ? ceil(x - 0.5) : floor(x + 0.5);
+    }
+}
+
+static double nf_round_to(double x, int prec)
+{
+    double m = 1;
+    int i;
+    for (i = 0; i < prec; i++) m *= 10;
+    return nf_rnd(x * m) / m;
+}
+
+static double nf_unit_arg(const char *s)
+{
+    char *e;
+    double v = strtod(s, &e), m = 1;
+    if (e == s || v < 1 || v != floor(v)) die(1, "invalid unit size: '%s'", s);
+    if (*e) {
+        const char *q = strchr(nf_letters, *e);
+        int base = 1000, p;
+        if (!q) die(1, "invalid unit size: '%s'", s);
+        if (e[1] == 'i') { base = 1024; e++; }
+        if (e[1]) die(1, "invalid unit size: '%s'", s);
+        for (p = 0; p <= q - nf_letters; p++) m *= base;
+    }
+    return v * m;
+}
+
+static char nf_orig[160];
+
+static int nf_parse(const char *tok0, double *val, int *decimals, int *scaled, char *err, size_t cap)
+{
+    const char *tok = tok0, *p, *q, *dot;
+    char buf[512], *e;
+    size_t sl = strlen(nf_suffix), tl;
+    int digits = 0, hasdot = 0, seen_i = 0;
+    double mult = 1;
+    while (*tok == ' ' || *tok == '\t') tok++;
+    p = tok;
+    snprintf(buf, sizeof buf, "%s", p);
+    tl = strlen(buf);
+    while (tl && (buf[tl - 1] == ' ' || buf[tl - 1] == '\t')) buf[--tl] = 0;
+    if (sl && tl >= sl && !strcmp(buf + tl - sl, nf_suffix)) buf[tl - sl] = 0;
+    q = buf;
+    if (*q == '-') q++;
+    while (isdigit((unsigned char)*q) || (*q == '.' && !hasdot)) {
+        if (*q == '.') { hasdot = 1; if (!isdigit((unsigned char)q[1])) { digits = 0; break; } }
+        else digits++;
+        q++;
+    }
+    if (!digits) { snprintf(err, cap, "invalid number: '%s'", tok); return -1; }
+    dot = strchr(buf, '.');
+    *decimals = dot && dot < q ? (int)(q - dot - 1) : 0;
+    *val = strtod(buf, &e);
+    { size_t ol = q - buf; if (ol >= sizeof nf_orig) ol = sizeof nf_orig - 1; memcpy(nf_orig, buf, ol); nf_orig[ol] = 0; }
+    *scaled = 0;
+    if (*q) {
+        const char *l = isalpha((unsigned char)*q) ? strchr(nf_letters, toupper((unsigned char)*q)) : NULL;
+        if (!l || (islower((unsigned char)*q) && *q != 'k')) { snprintf(err, cap, "invalid suffix in input: '%s'", tok); return -1; }
+        if (nf_from == NF_NONE) { snprintf(err, cap, "rejecting suffix in input: '%s' (consider using --from)", tok); return -1; }
+        seen_i = q[1] == 'i';
+        if (seen_i && (nf_from == NF_SI || nf_from == NF_IEC)) { snprintf(err, cap, "invalid suffix in input '%s': 'i'", tok); return -1; }
+        if (q[1 + seen_i]) { snprintf(err, cap, "invalid suffix in input: '%s'", tok); return -1; }
+        if (nf_from == NF_IECI && !seen_i) { snprintf(err, cap, "missing 'i' suffix in input: '%s' (e.g Ki/Mi/Gi)", tok); return -1; }
+        { int base = nf_from == NF_SI ? 1000 : nf_from == NF_IEC ? 1024 : seen_i ? 1024 : 1000, k; for (k = 0; k <= l - nf_letters; k++) mult *= base; }
+        *scaled = 1;
+    }
+    *val = *val * mult * nf_fromunit;
+    if (nf_fromunit != 1) *scaled = 1;
+    return 0;
+}
+
+static int nf_format(char *out, size_t cap, double v, int decimals, int scaled, char *err, size_t ecap)
+{
+    char num[160], suf[16] = "", tail[64];
+    int prec = nf_prec, base = nf_to == NF_SI ? 1000 : 1024, power = 0, useorig = 0;
+    double x = v / nf_tounit;
+    if (nf_to == NF_NONE) {
+        if (prec >= 0) x = nf_round_to(x, prec);
+        else if (scaled || nf_tounit != 1) { x = nf_rnd(x); prec = 0; }
+        else { prec = decimals; useorig = 1; }
+        if (fabs(x) >= 1e19) { snprintf(err, ecap, "value too large to be printed: '%g' (consider using --to)", x); return -1; }
+        if (useorig) {
+            const char *o = nf_orig, *z;
+            int neg = *o == '-';
+            if (neg) o++;
+            while (o[0] == '0' && isdigit((unsigned char)o[1])) o++;
+            for (z = o; *z == '0' || *z == '.'; z++) ;
+            neg = neg && *z;
+            snprintf(num, sizeof num, "%s%s", neg ? "-" : "", o);
+        } else {
+            snprintf(num, sizeof num, "%.*f", prec, x);
+            if (x == 0 && num[0] == '-') memmove(num, num + 1, strlen(num));
+        }
+    } else {
+        double ax = fabs(x), r, sx;
+        int pp;
+        while (ax >= base && power < 10) { ax /= base; power++; }
+        sx = x < 0 ? -ax : ax;
+        if (!power && prec < 0 && ax < 10) {
+            double f = floor(ax), d = ax - f, e = d > 0.5 ? f + 1 : d < 0.5 ? f : fmod(f, 2) == 0 ? f : f + 1;
+            snprintf(num, sizeof num, "%s%.0f", x < 0 ? "-" : "", e);
+        } else if (!power && prec < 0 && fabs(r = nf_round_to(sx, 0)) < base) snprintf(num, sizeof num, "%.0f", r);
+        else if (!power && prec >= 0 && fabs(r = nf_round_to(sx, prec)) < base) snprintf(num, sizeof num, "%.*f", prec, r);
+        else {
+            if (!power) { sx /= base; ax /= base; power = 1; }
+            pp = prec >= 0 ? prec : (ax < 10 ? 1 : 0);
+            r = nf_round_to(sx, pp);
+            if (fabs(r) >= base && power < 10) { r /= base; power++; if (prec < 0) pp = fabs(r) < 10 ? 1 : 0; }
+            else if (prec < 0) pp = fabs(r) < 10 ? 1 : 0;
+            if (fabs(r) >= base) { snprintf(err, ecap, "value too large to be printed: '%g' (cannot handle values > 999Q)", v); return -1; }
+            snprintf(num, sizeof num, "%.*f", pp, r);
+            snprintf(suf, sizeof suf, "%c%s", power == 1 && nf_to == NF_SI ? 'k' : nf_letters[power - 1], nf_to == NF_IECI ? "i" : "");
+        }
+    }
+    snprintf(tail, sizeof tail, "%s%s", suf, nf_suffix);
+    {
+        int len = strlen(num), tl = strlen(tail), pad = nf_fw - len - tl;
+        char *r = out;
+        r += snprintf(r, cap, "%s", nf_fpre);
+        if (nf_hasfw && nf_zeroflag && !nf_left) {
+            pad = nf_fw - len;
+            while (pad-- > 0) *r++ = '0';
+            r += sprintf(r, "%s%s", num, tail);
+        } else {
+            if (nf_hasfw && !nf_left) while (pad-- > 0) *r++ = ' ';
+            r += sprintf(r, "%s%s", num, tail);
+            if (nf_hasfw && nf_left) while (pad-- > 0) *r++ = ' ';
+        }
+        strcpy(r, nf_fpost);
+    }
+    return 0;
+}
+
+struct nfrange { long lo, hi; };
+
+static int nf_in(const struct nfrange *r, int n, long k)
+{
+    int i;
+    for (i = 0; i < n; i++) if (k >= r[i].lo && k <= r[i].hi) return 1;
+    return 0;
+}
+
+/* converts one field; the text that goes in its place lands in out */
+static int nf_field(const char *fld, int wsmode, int first, char *out, size_t cap, char *err, size_t ecap)
+{
+    double v;
+    int dec, scaled, lead = 0;
+    const char *p = fld;
+    char body[640];
+    while (*p == ' ' || *p == '\t') { p++; lead++; }
+    if (nf_parse(fld, &v, &dec, &scaled, err, ecap) < 0) return -1;
+    if (nf_format(body, sizeof body, v, dec, scaled, err, ecap) < 0) return -1;
+    if (nf_haspad && !nf_hasfw) {
+        int w = nf_pad < 0 ? -nf_pad : nf_pad, l = strlen(body), pad = w > l ? w - l : 0;
+        char *r = out;
+        if (wsmode && !first && lead) *r++ = ' ';
+        if (nf_pad >= 0) { while (pad-- > 0) *r++ = ' '; strcpy(r, body); }
+        else { strcpy(r, body); r += l; while (pad-- > 0) *r++ = ' '; *r = 0; }
+    } else if (wsmode && lead) {
+        int w = lead + (int)strlen(p), l = strlen(body), pad = w > l ? w - l : 0;
+        char *r = out;
+        while (pad-- > 0) *r++ = ' ';
+        strcpy(r, body);
+    } else snprintf(out, cap, "%s", body);
+    return 0;
+}
+
+static void nf_line(const char *line, int delim, struct nfrange *rg, int nr)
+{
+    char out[8192], err[700];
+    size_t o = 0, printed = 0;
+    int ws = delim < 0;
+    const char *p = line;
+    long k = 0;
+    if (!*p && nf_in(rg, nr, 1)) {
+        if (nf_field("", ws, 1, out, sizeof out, err, sizeof err) < 0) {
+            if (nf_invalid != IV_IGNORE) { fflush(stdout); say("%s", err); }
+            if (nf_invalid != IV_WARN && nf_invalid != IV_IGNORE) nf_status = 2;
+            if (nf_invalid == IV_ABORT) { finish_stdout(); exit(2); }
+        }
+        fputs(line, stdout); putchar(nf_term);
+        return;
+    }
+    out[0] = 0;
+    for (;;) {
+        const char *s = p, *e;
+        char fld[2048];
+        size_t fl;
+        k++;
+        if (ws) {
+            const char *t = p;
+            while (*t == ' ' || *t == '\t') t++;
+            if (!*t) { /* nothing left but blanks */ o += snprintf(out + o, sizeof out - o, "%s", p); break; }
+            while (*t && *t != ' ' && *t != '\t') t++;
+            e = t;
+        } else {
+            e = strchr(p, delim);
+            if (!e) e = p + strlen(p);
+        }
+        fl = e - s;
+        if (fl >= sizeof fld) fl = sizeof fld - 1;
+        memcpy(fld, s, fl);
+        fld[fl] = 0;
+        if (nf_in(rg, nr, k)) {
+            char conv[1024];
+            if (nf_field(fld, ws, k == 1, conv, sizeof conv, err, sizeof err) < 0) {
+                size_t skip = ws && (*s == ' ' || *s == '\t');
+                if (nf_invalid != IV_IGNORE) {
+                    fwrite(out + printed, 1, o - printed, stdout);
+                    if (skip) putchar(*s);
+                    printed = o + skip;
+                    fflush(stdout);
+                    say("%s", err);
+                }
+                if (nf_invalid != IV_WARN && nf_invalid != IV_IGNORE) nf_status = 2;
+                if (nf_invalid == IV_ABORT) { finish_stdout(); exit(2); }
+                if (printed > o) { o += snprintf(out + o, sizeof out - o, "%s", fld + skip); printed = o - strlen(fld + skip); }
+                else o += snprintf(out + o, sizeof out - o, "%s", fld);
+            } else o += snprintf(out + o, sizeof out - o, "%s", conv);
+        } else o += snprintf(out + o, sizeof out - o, "%s", fld);
+        if (!*e) break;
+        if (!ws) { out[o++] = delim; out[o] = 0; }
+        p = ws ? e : e + 1;
+        if (ws && !*p) break;
+    }
+    fputs(out + printed, stdout); putchar(nf_term);
+}
+
+static const char *nf_q(const char *s)
+{
+    char *b = xmalloc(strlen(s) * 2 + 3), *p = b;
+    *p++ = '\'';
+    for (; *s; s++) { if (*s == '\'') *p++ = '\\'; *p++ = *s; }
+    *p++ = '\'';
+    *p = 0;
+    return b;
+}
+
+static int nf_choice(const char *name, const char *arg, const char *const *list, int n)
+{
+    int i, hit = -1;
+    for (i = 0; i < n; i++) {
+        if (!strcmp(list[i], arg)) return i;
+        if (!strncmp(list[i], arg, strlen(arg))) hit = hit == -1 ? i : -2;
+    }
+    if (hit >= 0) return hit;
+    say("invalid argument '%s' for '--%s'", arg, name);
+    fprintf(stderr, "Valid arguments are:\n");
+    for (i = 0; i < n; i++) fprintf(stderr, "  - '%s'\n", list[i]);
+    usage_error();
+    return 0;
+}
+
+static int t_numfmt(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "from", 1, 1 }, { "to", 1, 2 }, { "from-unit", 1, 3 }, { "to-unit", 1, 4 }, { "round", 1, 5 }, { "suffix", 1, 6 },
+        { "padding", 1, 7 }, { "format", 1, 8 }, { "field", 1, 9 }, { "delimiter", 1, 'd' }, { "header", 2, 10 }, { "invalid", 1, 11 },
+        { "zero-terminated", 0, 'z' }, { "grouping", 0, 12 }, { "debug", 0, 13 }, { NULL, 0, 0 } };
+    static const char *const units[] = { "none", "si", "iec", "iec-i", "auto" };
+    static const char *const rounds[] = { "up", "down", "from-zero", "towards-zero", "nearest" };
+    static const char *const invs[] = { "abort", "fail", "warn", "ignore" };
+    int c, delim = -1, zero = 0, header = 0, nr = 0, group = 0, i;
+    const char *fmt = NULL, *fields = "1";
+    struct nfrange rg[64];
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    opts_reset();
+    while ((c = getopts(argc, argv, "d:z", lo)))
+        switch (c) {
+        case 1: nf_from = nf_choice("from", optarg, units, 5); break;
+        case 2: nf_to = nf_choice("to", optarg, units, 4); break;
+        case 3: nf_fromunit = nf_unit_arg(optarg); break;
+        case 4: nf_tounit = nf_unit_arg(optarg); break;
+        case 5: nf_round = nf_choice("round", optarg, rounds, 5); break;
+        case 6: nf_suffix = optarg; break;
+        case 7: { char *e; long v = strtol(optarg, &e, 10); if (*e || !v) die(1, "invalid padding value '%s'", optarg); nf_pad = v; nf_haspad = 1; break; }
+        case 8: fmt = optarg; break;
+        case 9: fields = optarg; break;
+        case 'd': if (optarg[0] && optarg[1]) die(1, "the delimiter must be a single character"); delim = (unsigned char)optarg[0]; break;
+        case 10: if (optarg) { char *e; long v = strtol(optarg, &e, 10); if (*e || v < 1) die(1, "invalid header value '%s'", optarg); header = v; } else header = 1; break;
+        case 11: nf_invalid = nf_choice("invalid", optarg, invs, 4); break;
+        case 'z': zero = 1; break;
+        case 12: group = 1; break;
+        default: break;
+        }
+    if (fmt) {
+        const char *p = fmt;
+        int found = 0;
+        for (; *p; p++) {
+            const char *d;
+            if (*p != '%') continue;
+            if (p[1] == '%') { p++; continue; }
+            if (found) die(1, "format %s has too many %% directives", nf_q(fmt));
+            found = 1;
+            d = p + 1;
+            if (*d == '0') { nf_zeroflag = 1; d++; }
+            if (*d == '\'') { group = 1; d++; }
+            if (*d == '-') { nf_left = 1; d++; }
+            if (isdigit((unsigned char)*d)) { nf_fw = 0; nf_hasfw = 1; while (isdigit((unsigned char)*d)) nf_fw = nf_fw * 10 + *d++ - '0'; }
+            if (*d == '.') { d++; nf_prec = 0; while (isdigit((unsigned char)*d)) nf_prec = nf_prec * 10 + *d++ - '0'; }
+            if (*d != 'f') die(1, "invalid format %s, directive must be %%[0]['][-][N][.][N]f", nf_q(fmt));
+            { char *pre = xmalloc(p - fmt + 1); memcpy(pre, fmt, p - fmt); pre[p - fmt] = 0; nf_fpre = pre; }
+            nf_fpost = d + 1;
+            p = d;
+        }
+        if (!found) die(1, "format %s has no %% directive", nf_q(fmt));
+    }
+    if (group && nf_to != NF_NONE) die(1, "grouping cannot be combined with --to");
+    {
+        const char *p = fields;
+        while (*p) {
+            char *e;
+            long lo_ = 1, hi = 1000000;
+            if (*p == '-') { p++; hi = isdigit((unsigned char)*p) ? strtol(p, &e, 10) : 1000000; if (!isdigit((unsigned char)*p)) e = (char *)p; }
+            else {
+                lo_ = strtol(p, &e, 10);
+                if (e == p || lo_ < 1) die(1, "invalid field value '%s'", fields);
+                hi = lo_;
+                if (*e == '-') { p = e + 1; if (isdigit((unsigned char)*p)) hi = strtol(p, &e, 10); else { hi = 1000000; e = (char *)p; } }
+            }
+            p = e;
+            if (nr == 64) die(1, "too many fields");
+            rg[nr].lo = lo_; rg[nr].hi = hi; nr++;
+            if (*p == ',') p++; else if (*p) die(1, "invalid field value '%s'", fields);
+        }
+    }
+    if (zero) nf_term = 0;
+    if (nops) {
+        for (i = 0; i < nops; i++) nf_line(ops[i], delim, rg, nr);
+    } else {
+        long ln = 0;
+        while ((n = getdelim(&line, &cap, zero ? 0 : '\n', stdin)) >= 0) {
+            if (n && line[n - 1] == (zero ? 0 : '\n')) line[--n] = 0;
+            if (++ln <= header) { fputs(line, stdout); putchar(nf_term); continue; }
+            nf_line(line, delim, rg, nr);
+        }
+    }
+    return finish_stdout() ? 1 : nf_status;
+}
+
+static const char *const dc_db[] = {
+    "# colors for ls --color, in the dircolors format\n",
+    "# TERM and COLORTERM lines say which terminals the lines after them are for\n",
+    "\n",
+    "COLORTERM ?*\n",
+    "TERM Eterm\n",
+    "TERM ansi\n",
+    "TERM *color*\n",
+    "TERM con[0-9]*x[0-9]*\n",
+    "TERM cons25\n",
+    "TERM console\n",
+    "TERM cygwin\n",
+    "TERM *direct*\n",
+    "TERM dtterm\n",
+    "TERM gnome\n",
+    "TERM hurd\n",
+    "TERM jfbterm\n",
+    "TERM konsole\n",
+    "TERM kterm\n",
+    "TERM linux\n",
+    "TERM linux-c\n",
+    "TERM mlterm\n",
+    "TERM putty\n",
+    "TERM rxvt*\n",
+    "TERM screen*\n",
+    "TERM st\n",
+    "TERM terminator\n",
+    "TERM tmux*\n",
+    "TERM vt100\n",
+    "TERM vt220\n",
+    "TERM xterm*\n",
+    "\n",
+    "# file types\n",
+    "RESET 0\n",
+    "DIR 01;34\n",
+    "LINK 01;36\n",
+    "MULTIHARDLINK 00\n",
+    "FIFO 40;33\n",
+    "SOCK 01;35\n",
+    "DOOR 01;35\n",
+    "BLK 40;33;01\n",
+    "CHR 40;33;01\n",
+    "ORPHAN 01;05;37;41\n",
+    "MISSING 01;05;37;41\n",
+    "SETUID 37;41\n",
+    "SETGID 30;43\n",
+    "CAPABILITY 00\n",
+    "STICKY_OTHER_WRITABLE 30;42\n",
+    "OTHER_WRITABLE 34;42\n",
+    "STICKY 37;44\n",
+    "EXEC 01;32\n",
+    "\n",
+    "# file name endings\n",
+    ".7z 01;31\n",
+    ".ace 01;31\n",
+    ".alz 01;31\n",
+    ".apk 01;31\n",
+    ".arc 01;31\n",
+    ".arj 01;31\n",
+    ".bz 01;31\n",
+    ".bz2 01;31\n",
+    ".cab 01;31\n",
+    ".cpio 01;31\n",
+    ".crate 01;31\n",
+    ".deb 01;31\n",
+    ".drpm 01;31\n",
+    ".dwm 01;31\n",
+    ".dz 01;31\n",
+    ".ear 01;31\n",
+    ".egg 01;31\n",
+    ".esd 01;31\n",
+    ".gz 01;31\n",
+    ".jar 01;31\n",
+    ".lha 01;31\n",
+    ".lrz 01;31\n",
+    ".lz 01;31\n",
+    ".lz4 01;31\n",
+    ".lzh 01;31\n",
+    ".lzma 01;31\n",
+    ".lzo 01;31\n",
+    ".pyz 01;31\n",
+    ".rar 01;31\n",
+    ".rpm 01;31\n",
+    ".rz 01;31\n",
+    ".sar 01;31\n",
+    ".swm 01;31\n",
+    ".t7z 01;31\n",
+    ".tar 01;31\n",
+    ".taz 01;31\n",
+    ".tbz 01;31\n",
+    ".tbz2 01;31\n",
+    ".tgz 01;31\n",
+    ".tlz 01;31\n",
+    ".txz 01;31\n",
+    ".tz 01;31\n",
+    ".tzo 01;31\n",
+    ".tzst 01;31\n",
+    ".udeb 01;31\n",
+    ".war 01;31\n",
+    ".whl 01;31\n",
+    ".wim 01;31\n",
+    ".xz 01;31\n",
+    ".z 01;31\n",
+    ".zip 01;31\n",
+    ".zoo 01;31\n",
+    ".zst 01;31\n",
+    ".avif 01;35\n",
+    ".jpg 01;35\n",
+    ".jpeg 01;35\n",
+    ".jxl 01;35\n",
+    ".mjpg 01;35\n",
+    ".mjpeg 01;35\n",
+    ".gif 01;35\n",
+    ".bmp 01;35\n",
+    ".pbm 01;35\n",
+    ".pgm 01;35\n",
+    ".ppm 01;35\n",
+    ".tga 01;35\n",
+    ".xbm 01;35\n",
+    ".xpm 01;35\n",
+    ".tif 01;35\n",
+    ".tiff 01;35\n",
+    ".png 01;35\n",
+    ".svg 01;35\n",
+    ".svgz 01;35\n",
+    ".mng 01;35\n",
+    ".pcx 01;35\n",
+    ".mov 01;35\n",
+    ".mpg 01;35\n",
+    ".mpeg 01;35\n",
+    ".m2v 01;35\n",
+    ".mkv 01;35\n",
+    ".webm 01;35\n",
+    ".webp 01;35\n",
+    ".ogm 01;35\n",
+    ".mp4 01;35\n",
+    ".m4v 01;35\n",
+    ".mp4v 01;35\n",
+    ".vob 01;35\n",
+    ".qt 01;35\n",
+    ".nuv 01;35\n",
+    ".wmv 01;35\n",
+    ".asf 01;35\n",
+    ".rm 01;35\n",
+    ".rmvb 01;35\n",
+    ".flc 01;35\n",
+    ".avi 01;35\n",
+    ".fli 01;35\n",
+    ".flv 01;35\n",
+    ".gl 01;35\n",
+    ".dl 01;35\n",
+    ".xcf 01;35\n",
+    ".xwd 01;35\n",
+    ".yuv 01;35\n",
+    ".cgm 01;35\n",
+    ".emf 01;35\n",
+    ".ogv 01;35\n",
+    ".ogx 01;35\n",
+    ".cfg 00;32\n",
+    ".conf 00;32\n",
+    ".diff 00;32\n",
+    ".doc 00;32\n",
+    ".ini 00;32\n",
+    ".log 00;32\n",
+    ".patch 00;32\n",
+    ".pdf 00;32\n",
+    ".ps 00;32\n",
+    ".tex 00;32\n",
+    ".txt 00;32\n",
+    ".aac 00;36\n",
+    ".au 00;36\n",
+    ".flac 00;36\n",
+    ".m4a 00;36\n",
+    ".mid 00;36\n",
+    ".midi 00;36\n",
+    ".mka 00;36\n",
+    ".mp3 00;36\n",
+    ".mpc 00;36\n",
+    ".ogg 00;36\n",
+    ".ra 00;36\n",
+    ".wav 00;36\n",
+    ".oga 00;36\n",
+    ".opus 00;36\n",
+    ".spx 00;36\n",
+    ".xspf 00;36\n",
+    "*~ 00;90\n",
+    "*# 00;90\n",
+    ".bak 00;90\n",
+    ".crdownload 00;90\n",
+    ".dpkg-dist 00;90\n",
+    ".dpkg-new 00;90\n",
+    ".dpkg-old 00;90\n",
+    ".dpkg-tmp 00;90\n",
+    ".old 00;90\n",
+    ".orig 00;90\n",
+    ".part 00;90\n",
+    ".rej 00;90\n",
+    ".rpmnew 00;90\n",
+    ".rpmorig 00;90\n",
+    ".rpmsave 00;90\n",
+    ".swp 00;90\n",
+    ".tmp 00;90\n",
+    ".ucf-dist 00;90\n",
+    ".ucf-new 00;90\n",
+    ".ucf-old 00;90\n",
+    NULL };
+
+static const struct { const char *kw, *key; } dc_keys[] = {
+    { "RESET", "rs" }, { "NORMAL", "no" }, { "NORM", "no" }, { "FILE", "fi" }, { "DIR", "di" }, { "LNK", "ln" }, { "LINK", "ln" }, { "SYMLINK", "ln" },
+    { "ORPHAN", "or" }, { "MISSING", "mi" }, { "FIFO", "pi" }, { "PIPE", "pi" }, { "SOCK", "so" }, { "BLK", "bd" }, { "BLOCK", "bd" }, { "CHR", "cd" },
+    { "CHAR", "cd" }, { "DOOR", "do" }, { "EXEC", "ex" }, { "LEFT", "lc" }, { "LEFTCODE", "lc" }, { "RIGHT", "rc" }, { "RIGHTCODE", "rc" },
+    { "END", "ec" }, { "ENDCODE", "ec" }, { "SUID", "su" }, { "SETUID", "su" }, { "SGID", "sg" }, { "SETGID", "sg" }, { "STICKY", "st" },
+    { "OTHER_WRITABLE", "ow" }, { "OWR", "ow" }, { "STICKY_OTHER_WRITABLE", "tw" }, { "OWT", "tw" }, { "CAPABILITY", "ca" }, { "MULTIHARDLINK", "mh" },
+    { "CLRTOEOL", "cl" }, { NULL, NULL } };
+
+static void dc_quote(char **buf, size_t *len, size_t *cap, const char *s, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        char t[8];
+        int k;
+        if (s[i] == '\'') memcpy(t, "'\\''", k = 4);
+        else if (s[i] == ':' || s[i] == '=') { t[0] = '\\'; t[1] = s[i]; k = 2; }
+        else { t[0] = s[i]; k = 1; }
+        if (*len + k + 1 > *cap) { *cap = *cap * 2 + 64; *buf = xrealloc(*buf, *cap); }
+        memcpy(*buf + *len, t, k);
+        *len += k;
+    }
+}
+
+static void dc_add(char **buf, size_t *len, size_t *cap, const char *s, size_t n)
+{
+    if (*len + n + 1 > *cap) { *cap = *cap * 2 + n + 64; *buf = xrealloc(*buf, *cap); }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+}
+
+static int t_dircolors(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "bourne-shell", 0, 'b' }, { "sh", 0, 'b' }, { "csh", 0, 'c' }, { "c-shell", 0, 'c' }, { "print-database", 0, 'p' },
+        { "print-ls-colors", 0, 1000 }, { NULL, 0, 0 } };
+    int c, shell = 0, print = 0, lscolors = 0, ok = 1, state = 0, i;
+    const char *term = getenv("TERM"), *cterm = getenv("COLORTERM");
+    char *buf = NULL;
+    size_t len = 0, cap = 0, lineno = 0;
+    FILE *f = NULL;
+    char *line = NULL, *lp;
+    size_t lcap = 0;
+    const char *file = NULL;
+    opts_reset();
+    while ((c = getopts(argc, argv, "bcp", lo)))
+        switch (c) { case 'b': shell = 1; break; case 'c': shell = 2; break; case 'p': print = 1; break; case 1000: lscolors = 1; break; default: break; }
+    if (nops > 1) extra_operand(ops[1]);
+    if (print && nops) {
+        say("extra operand '%s'", ops[0]);
+        fprintf(stderr, "file operands cannot be combined with --print-database (-p)\n");
+        usage_error();
+    }
+    if (print && shell) { say("the options to output non shell syntax,\nand to select a shell syntax are mutually exclusive"); usage_error(); }
+    if (print) {
+        for (i = 0; dc_db[i]; i++) fputs(dc_db[i], stdout);
+        return finish_stdout() ? 1 : 0;
+    }
+    if (!shell && !lscolors) {
+        const char *sh = getenv("SHELL");
+        size_t l;
+        if (!sh || !*sh) die(1, "no SHELL environment variable, and no shell type option given");
+        l = strlen(sh);
+        shell = (l >= 3 && !strcmp(sh + l - 3, "csh")) ? 2 : 1;
+    }
+    file = nops ? ops[0] : NULL;
+    if (file) {
+        f = !strcmp(file, "-") ? stdin : fopen(file, "r");
+        if (!f) { perr("%s", file); return 1; }
+    }
+    if (!term) term = "none";
+    i = 0;
+    for (;;) {
+        char *kw, *arg, *e;
+        size_t kl;
+        int k;
+        if (f) { ssize_t n = getline(&line, &lcap, f); if (n < 0) break; lp = line; }
+        else { if (!dc_db[i]) break; lcap = strlen(dc_db[i]) + 1; line = xrealloc(line, lcap); strcpy(line, dc_db[i++]); lp = line; }
+        lineno++;
+        while (*lp == ' ' || *lp == '\t') lp++;
+        if (!*lp || *lp == '#' || *lp == '\n') continue;
+        e = lp + strlen(lp);
+        while (e > lp && (e[-1] == '\n' || e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) *--e = 0;
+        kw = lp;
+        while (*lp && *lp != ' ' && *lp != '\t') lp++;
+        kl = lp - kw;
+        if (*lp) *lp++ = 0;
+        while (*lp == ' ' || *lp == '\t') lp++;
+        if (!*lp || *lp == '#') { say("%s:%zu: invalid line;  missing second token", file ? file : "<internal>", lineno); ok = 0; continue; }
+        arg = lp;
+        while (*lp && *lp != ' ' && *lp != '\t') lp++;
+        *lp = 0;
+        if (!strcasecmp(kw, "TERM") || !strcasecmp(kw, "COLORTERM")) {
+            const char *env = kw[0] == 'T' || kw[0] == 't' ? term : cterm;
+            if (env && glob_match(arg, env)) state = 3;
+            else if (state != 3) state = 1;
+            continue;
+        }
+        if (state == 3) state = 2;
+        if (state == 1) continue;
+        if (!strcasecmp(kw, "COLOR") || !strcasecmp(kw, "OPTIONS") || !strcasecmp(kw, "EIGHTBIT")) continue;
+        if (*kw == '*' || *kw == '.') {
+            if (*kw == '.') dc_add(&buf, &len, &cap, "*", 1);
+            dc_quote(&buf, &len, &cap, kw, kl);
+            dc_add(&buf, &len, &cap, "=", 1);
+        } else {
+            for (k = 0; dc_keys[k].kw; k++) if (!strcasecmp(kw, dc_keys[k].kw)) break;
+            if (!dc_keys[k].kw) { say("%s:%zu: unrecognized keyword %s", file ? file : "<internal>", lineno, kw); ok = 0; continue; }
+            dc_add(&buf, &len, &cap, dc_keys[k].key, 2);
+            dc_add(&buf, &len, &cap, "=", 1);
+        }
+        dc_quote(&buf, &len, &cap, arg, strlen(arg));
+        dc_add(&buf, &len, &cap, ":", 1);
+    }
+    if (f && f != stdin) fclose(f);
+    if (!ok) return 1;
+    if (!buf) buf = xstrdup("");
+    buf[len] = 0;
+    if (lscolors) {
+        char *p = buf;
+        while (*p) {
+            char *v = NULL, *q = p, key[256], val[256];
+            size_t kn = 0, vn = 0;
+            while (*q && *q != ':') {
+                if (!strncmp(q, "'\\''", 4)) { if (v) { if (vn < sizeof val - 1) val[vn++] = '\''; } else if (kn < sizeof key - 1) key[kn++] = '\''; q += 4; continue; }
+                if (*q == '\\' && q[1]) q++;
+                if (*q == '=' && !v && q[-1] != '\\') { v = q + 1; q++; continue; }
+                if (v) { if (vn < sizeof val - 1) val[vn++] = *q; } else if (kn < sizeof key - 1) key[kn++] = *q;
+                q++;
+            }
+            key[kn] = val[vn] = 0;
+            printf("\033[%sm%s\t%s\033[0m\n", val, key, val);
+            p = *q ? q + 1 : q;
+        }
+        return finish_stdout() ? 1 : 0;
+    }
+    if (shell == 2) printf("setenv LS_COLORS '%s'\n", buf);
+    else printf("LS_COLORS='%s';\nexport LS_COLORS\n", buf);
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- stty ---- */
+
+struct ktermios { unsigned iflag, oflag, cflag, lflag; unsigned char line, cc[19]; unsigned ispeed, ospeed; };
+
+enum { SM_I, SM_O, SM_C, SM_L };
+
+struct stmode { const char *name; int type; unsigned bits, mask; int sane; };
+/* sane: 1 is set by sane, 2 is cleared by it, 0 is left alone */
+static const struct stmode st_modes[] = {
+    { "parenb", SM_C, 0x100, 0x100, 2 }, { "parodd", SM_C, 0x200, 0x200, 2 }, { "cmspar", SM_C, 0x40000000, 0x40000000, 2 },
+    { "cs5", SM_C, 0, 0x30, 0 }, { "cs6", SM_C, 0x10, 0x30, 0 }, { "cs7", SM_C, 0x20, 0x30, 0 }, { "cs8", SM_C, 0x30, 0x30, 1 },
+    { "hupcl", SM_C, 0x400, 0x400, 0 }, { "hup", SM_C, 0x400, 0x400, 0 }, { "cstopb", SM_C, 0x40, 0x40, 2 }, { "cread", SM_C, 0x80, 0x80, 1 },
+    { "clocal", SM_C, 0x800, 0x800, 2 }, { "crtscts", SM_C, 0x80000000, 0x80000000, 2 },
+    { "ignbrk", SM_I, 1, 1, 2 }, { "brkint", SM_I, 2, 2, 1 }, { "ignpar", SM_I, 4, 4, 0 }, { "parmrk", SM_I, 8, 8, 0 }, { "inpck", SM_I, 0x10, 0x10, 0 },
+    { "istrip", SM_I, 0x20, 0x20, 0 }, { "inlcr", SM_I, 0x40, 0x40, 2 }, { "igncr", SM_I, 0x80, 0x80, 2 }, { "icrnl", SM_I, 0x100, 0x100, 1 },
+    { "ixon", SM_I, 0x400, 0x400, 0 }, { "ixoff", SM_I, 0x1000, 0x1000, 2 }, { "tandem", SM_I, 0x1000, 0x1000, 2 }, { "iuclc", SM_I, 0x200, 0x200, 2 },
+    { "ixany", SM_I, 0x800, 0x800, 2 }, { "imaxbel", SM_I, 0x2000, 0x2000, 1 }, { "iutf8", SM_I, 0x4000, 0x4000, 2 },
+    { "opost", SM_O, 1, 1, 1 }, { "olcuc", SM_O, 2, 2, 2 }, { "ocrnl", SM_O, 8, 8, 2 }, { "onlcr", SM_O, 4, 4, 1 }, { "onocr", SM_O, 0x10, 0x10, 2 },
+    { "onlret", SM_O, 0x20, 0x20, 2 }, { "ofill", SM_O, 0x40, 0x40, 2 }, { "ofdel", SM_O, 0x80, 0x80, 2 },
+    { "nl0", SM_O, 0, 0x100, 1 }, { "nl1", SM_O, 0x100, 0x100, 0 }, { "cr0", SM_O, 0, 0x600, 1 }, { "cr1", SM_O, 0x200, 0x600, 0 },
+    { "cr2", SM_O, 0x400, 0x600, 0 }, { "cr3", SM_O, 0x600, 0x600, 0 }, { "tab0", SM_O, 0, 0x1800, 1 }, { "tab1", SM_O, 0x800, 0x1800, 0 },
+    { "tab2", SM_O, 0x1000, 0x1800, 0 }, { "tab3", SM_O, 0x1800, 0x1800, 0 }, { "bs0", SM_O, 0, 0x2000, 1 }, { "bs1", SM_O, 0x2000, 0x2000, 0 },
+    { "vt0", SM_O, 0, 0x4000, 1 }, { "vt1", SM_O, 0x4000, 0x4000, 0 }, { "ff0", SM_O, 0, 0x8000, 1 }, { "ff1", SM_O, 0x8000, 0x8000, 0 },
+    { "isig", SM_L, 1, 1, 1 }, { "icanon", SM_L, 2, 2, 1 }, { "iexten", SM_L, 0x8000, 0x8000, 1 }, { "echo", SM_L, 8, 8, 1 }, { "echoe", SM_L, 0x10, 0x10, 1 },
+    { "crterase", SM_L, 0x10, 0x10, 1 }, { "echok", SM_L, 0x20, 0x20, 1 }, { "echonl", SM_L, 0x40, 0x40, 2 }, { "noflsh", SM_L, 0x80, 0x80, 2 },
+    { "xcase", SM_L, 4, 4, 2 }, { "tostop", SM_L, 0x100, 0x100, 2 }, { "echoprt", SM_L, 0x400, 0x400, 2 }, { "prterase", SM_L, 0x400, 0x400, 2 },
+    { "echoctl", SM_L, 0x200, 0x200, 1 }, { "ctlecho", SM_L, 0x200, 0x200, 1 }, { "echoke", SM_L, 0x800, 0x800, 1 }, { "crtkill", SM_L, 0x800, 0x800, 1 },
+    { "flusho", SM_L, 0x1000, 0x1000, 2 }, { "extproc", SM_L, 0x10000, 0x10000, 2 }, { NULL, 0, 0, 0, 0 } };
+
+/* the order -a lists them in, a group per line. a mask with several names is one choice among them */
+static const char *const st_show[4][32] = {
+    { "parenb", "parodd", "cmspar", "cs", "hupcl", "cstopb", "cread", "clocal", "crtscts", NULL },
+    { "ignbrk", "brkint", "ignpar", "parmrk", "inpck", "istrip", "inlcr", "igncr", "icrnl", "ixon", "ixoff", "iuclc", "ixany", "imaxbel", "iutf8", NULL },
+    { "opost", "olcuc", "ocrnl", "onlcr", "onocr", "onlret", "ofill", "ofdel", "nl", "cr", "tab", "bs", "vt", "ff", NULL },
+    { "isig", "icanon", "iexten", "echo", "echoe", "echok", "echonl", "noflsh", "xcase", "tostop", "echoprt", "echoctl", "echoke", "flusho", "extproc", NULL } };
+
+static const struct { const char *name; int idx; unsigned char def; } st_chars[] = {
+    { "intr", 0, 3 }, { "quit", 1, 28 }, { "erase", 2, 127 }, { "kill", 3, 21 }, { "eof", 4, 4 }, { "eol", 11, 0 }, { "eol2", 16, 0 }, { "swtch", 7, 0 },
+    { "start", 8, 17 }, { "stop", 9, 19 }, { "susp", 10, 26 }, { "rprnt", 12, 18 }, { "werase", 14, 23 }, { "lnext", 15, 22 }, { "discard", 13, 15 },
+    { NULL, 0, 0 } };
+
+static const struct { unsigned code; long speed; } st_speeds[] = { { 0, 0 }, { 1, 50 }, { 2, 75 }, { 3, 110 }, { 4, 134 }, { 5, 150 }, { 6, 200 }, { 7, 300 },
+    { 8, 600 }, { 9, 1200 }, { 10, 1800 }, { 11, 2400 }, { 12, 4800 }, { 13, 9600 }, { 14, 19200 }, { 15, 38400 }, { 0x1001, 57600 }, { 0x1002, 115200 },
+    { 0x1003, 230400 }, { 0x1004, 460800 }, { 0x1005, 500000 }, { 0x1006, 576000 }, { 0x1007, 921600 }, { 0x1008, 1000000 }, { 0x1009, 1152000 },
+    { 0x100a, 1500000 }, { 0x100b, 2000000 }, { 0x100c, 2500000 }, { 0x100d, 3000000 }, { 0x100e, 3500000 }, { 0x100f, 4000000 }, { 0, -1 } };
+
+static int st_col, st_max = 80;
+
+static void st_wrap(const char *fmt, ...)
+{
+    char buf[200];
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    n = strlen(buf);
+    if (st_col > 0) {
+        if (st_col + n + 1 >= st_max) { putchar('\n'); st_col = 0; }
+        else { putchar(' '); st_col++; }
+    }
+    fputs(buf, stdout);
+    st_col += n;
+}
+
+static void st_nl(void) { if (st_col) putchar('\n'); st_col = 0; }
+
+static unsigned *st_field(struct ktermios *t, int type) { return type == SM_I ? &t->iflag : type == SM_O ? &t->oflag : type == SM_C ? &t->cflag : &t->lflag; }
+
+static const char *st_char(unsigned char c, char *buf)
+{
+    char *p = buf;
+    if (!c) return "<undef>";
+    if (c >= 128) { *p++ = 'M'; *p++ = '-'; c -= 128; }
+    if (c < 32) { *p++ = '^'; *p++ = c + 64; }
+    else if (c == 127) { *p++ = '^'; *p++ = '?'; }
+    else *p++ = c;
+    *p = 0;
+    return buf;
+}
+
+static void st_norm(struct ktermios *t)
+{
+    int j;
+    if (t->cflag & 0x100f0000u) return;
+    for (j = 0; st_speeds[j].speed >= 0; j++)
+        if (st_speeds[j].speed == (long)t->ispeed) { t->cflag |= (st_speeds[j].code & 0xf) << 16 | (st_speeds[j].code & 0x1000) << 16; return; }
+    t->cflag |= 0x10000000u;
+}
+
+static int st_find(const char *name)
+{
+    int i;
+    for (i = 0; st_modes[i].name; i++) if (!strcmp(st_modes[i].name, name)) return i;
+    return -1;
+}
+
+static int st_on(const struct ktermios *t, const struct stmode *m)
+{
+    unsigned v = m->type == SM_I ? t->iflag : m->type == SM_O ? t->oflag : m->type == SM_C ? t->cflag : t->lflag;
+    return (v & m->mask) == m->bits;
+}
+
+static void st_set(struct ktermios *t, const char *name, int on)
+{
+    int i = st_find(name);
+    unsigned *f;
+    if (i < 0) return;
+    f = st_field(t, st_modes[i].type);
+    if (on) *f = (*f & ~st_modes[i].mask) | st_modes[i].bits;
+    else *f &= ~st_modes[i].mask;
+}
+
+static void st_sane(struct ktermios *t)
+{
+    int i;
+    for (i = 0; st_modes[i].name; i++) {
+        if (st_modes[i].sane == 1) st_set(t, st_modes[i].name, 1);
+        else if (st_modes[i].sane == 2) st_set(t, st_modes[i].name, 0);
+    }
+    for (i = 0; st_chars[i].name; i++) t->cc[st_chars[i].idx] = st_chars[i].def;
+    t->cc[6] = 1; t->cc[5] = 0;
+}
+
+static void st_print(const struct ktermios *t, int all, int ws_rows, int ws_cols, int havews)
+{
+    int g, i;
+    long ibaud = t->ispeed, obaud = t->ospeed;
+    char cb[8];
+    st_col = 0;
+    {
+        const char *c = getenv("COLUMNS");
+        char *e;
+        long v = c ? strtol(c, &e, 10) : 0;
+        st_max = c && *c && !*e && v > 0 ? (int)v : 80;
+    }
+    if (ibaud && ibaud != obaud) { st_wrap("ispeed %ld baud;", ibaud); st_wrap("ospeed %ld baud;", obaud); }
+    else st_wrap("speed %ld baud;", obaud);
+    if (all && havews) { st_wrap("rows %d;", ws_rows); st_wrap("columns %d;", ws_cols); }
+    st_wrap("line = %d;", t->line);
+    st_nl();
+    for (i = 0; st_chars[i].name; i++) {
+        unsigned char c = t->cc[st_chars[i].idx];
+        if (all || c != st_chars[i].def) st_wrap("%s = %s;", st_chars[i].name, st_char(c, cb));
+    }
+    if (all || !(t->lflag & 2)) { st_wrap("min = %d;", t->cc[6]); st_wrap("time = %d;", t->cc[5]); }
+    st_nl();
+    for (g = 0; g < 4; g++) {
+        for (i = 0; st_show[g][i]; i++) {
+            const char *n = st_show[g][i];
+            int k;
+            if (!strcmp(n, "cs") || !strcmp(n, "nl") || !strcmp(n, "cr") || !strcmp(n, "tab") || !strcmp(n, "bs") || !strcmp(n, "vt") || !strcmp(n, "ff")) {
+                char nm[8];
+                int j, best = -1;
+                for (j = 0; j < 8; j++) {
+                    snprintf(nm, sizeof nm, "%s%d", n, !strcmp(n, "cs") ? j + 5 : j);
+                    k = st_find(nm);
+                    if (k >= 0 && st_on(t, &st_modes[k])) { best = k; break; }
+                }
+                if (best >= 0 && (all || st_modes[best].sane != 1 ? 0 : 0)) { }
+                if (best >= 0) {
+                    int saneval = 0;
+                    for (k = 0; st_modes[k].name; k++) if (!strncmp(st_modes[k].name, n, strlen(n)) && st_modes[k].mask == st_modes[best].mask && st_modes[k].sane == 1) saneval = k;
+                    if (all || best != saneval) st_wrap("%s", st_modes[best].name);
+                }
+                continue;
+            }
+            k = st_find(n);
+            if (k < 0) continue;
+            {
+                int on = st_on(t, &st_modes[k]);
+                if (all) st_wrap("%s%s", on ? "" : "-", n);
+                else if (st_modes[k].sane == 1 && !on) st_wrap("-%s", n);
+                else if (st_modes[k].sane == 2 && on) st_wrap("%s", n);
+            }
+        }
+        st_nl();
+    }
+}
+
+static int st_charval(const char *s, unsigned char *out)
+{
+    char *e;
+    if (!strcmp(s, "^-") || !strcmp(s, "undef")) { *out = 0; return 0; }
+    if (s[0] == '^' && s[1] && !s[2]) { *out = s[1] == '?' ? 127 : (s[1] & 31); return 0; }
+    if (s[0] && !s[1]) { *out = (unsigned char)s[0]; return 0; }
+    { long v = strtol(s, &e, 0); if (*e || v < 0 || v > 255) return -1; *out = v; return 0; }
+}
+
+static int t_stty(int argc, char **argv)
+{
+    struct ktermios t, orig;
+    int i, fd = 0, all = 0, save = 0, nset = 0, havews = 0;
+    const char *dev = NULL;
+    struct { unsigned short r, c, x, y; } ws = { 0, 0, 0, 0 };
+    int a;
+    char **sv = xmalloc((argc + 1) * sizeof *sv);
+    int ns = 0;
+    for (a = 1; a < argc; a++) {
+        const char *s = argv[a];
+        if (!strcmp(s, "-a") || !strcmp(s, "--all")) all = 1;
+        else if (!strcmp(s, "-g") || !strcmp(s, "--save")) save = 1;
+        else if (!strcmp(s, "-F") || !strcmp(s, "--file")) { if (a + 1 >= argc) { say("option requires an argument -- 'F'"); usage_error(); } dev = argv[++a]; }
+        else if (!strncmp(s, "--file=", 7)) dev = s + 7;
+        else if (!strncmp(s, "-F", 2) && s[2]) dev = s + 2;
+        else if (!strcmp(s, "--help")) { print_usage(); return 0; }
+        else if (!strcmp(s, "--version")) { printf("stty (rifle) " VERSION "\n"); return 0; }
+        else sv[ns++] = argv[a];
+    }
+    if (dev) { fd = open(dev, O_RDONLY | O_NONBLOCK); if (fd < 0) { perr("%s", dev); return 1; } }
+    if (ioctl(fd, 0x802c542a, &t) < 0) { say("%s: %s", dev ? dev : "'standard input'", strerror(errno)); return 1; }
+    st_norm(&t);
+    orig = t;
+    if (ioctl(fd, 0x5413, &ws) == 0) havews = 1;
+    if ((all || save) && ns) die(1, "when specifying an output style, modes may not be set");
+    if (all && save) die(1, "the options for verbose and stty-readable output styles are\nmutually exclusive");
+    if (save) {
+        int k;
+        printf("%x:%x:%x:%x", t.iflag, t.oflag, t.cflag, t.lflag);
+        for (k = 0; k < 32; k++) printf(":%x", k < 19 ? t.cc[k] : 0);
+        putchar('\n');
+        return finish_stdout() ? 1 : 0;
+    }
+    if (!ns) { st_print(&t, all, ws.r, ws.c, havews); return finish_stdout() ? 1 : 0; }
+    for (i = 0; i < ns; i++) {
+        const char *s = sv[i];
+        int neg = s[0] == '-' && s[1], k;
+        const char *name = neg ? s + 1 : s;
+        char *e;
+        if (!strcmp(s, "size")) { if (!havews) die(1, "%s: %s", dev ? dev : "standard input", strerror(ENOTTY)); printf("%d %d\n", ws.r, ws.c); continue; }
+        if (!strcmp(s, "speed")) { printf("%u\n", t.ospeed); continue; }
+        if (!strcmp(s, "sane")) { st_sane(&t); nset = 1; continue; }
+        if (!strcmp(name, "raw") || !strcmp(name, "cooked")) {
+            int raw = (!strcmp(name, "raw")) != neg;
+            static const char *const off[] = { "ignbrk", "brkint", "ignpar", "parmrk", "inpck", "istrip", "inlcr", "igncr", "icrnl", "ixon", "ixoff", "icanon", "opost", "isig", "iuclc", "ixany", "imaxbel", "xcase", NULL };
+            static const char *const on[] = { "brkint", "ignpar", "istrip", "icrnl", "ixon", "opost", "isig", "icanon", NULL };
+            int j;
+            if (raw) { for (j = 0; off[j]; j++) st_set(&t, off[j], 0); t.cc[6] = 1; t.cc[5] = 0; }
+            else { for (j = 0; on[j]; j++) st_set(&t, on[j], 1); t.cc[4] = 4; t.cc[11] = 0; }
+            nset = 1; continue;
+        }
+        if (!strcmp(name, "cbreak")) { st_set(&t, "icanon", neg); nset = 1; continue; }
+        if (!strcmp(name, "evenp") || !strcmp(name, "parity")) { if (neg) { st_set(&t, "parenb", 0); st_set(&t, "cs8", 1); } else { st_set(&t, "parenb", 1); st_set(&t, "parodd", 0); st_set(&t, "cs7", 1); } nset = 1; continue; }
+        if (!strcmp(name, "oddp")) { if (neg) { st_set(&t, "parenb", 0); st_set(&t, "cs8", 1); } else { st_set(&t, "parenb", 1); st_set(&t, "parodd", 1); st_set(&t, "cs7", 1); } nset = 1; continue; }
+        if (!strcmp(name, "pass8")) { if (neg) { st_set(&t, "parenb", 1); st_set(&t, "istrip", 1); st_set(&t, "cs7", 1); } else { st_set(&t, "parenb", 0); st_set(&t, "istrip", 0); st_set(&t, "cs8", 1); } nset = 1; continue; }
+        if (!strcmp(name, "litout")) { if (neg) { st_set(&t, "parenb", 1); st_set(&t, "istrip", 1); st_set(&t, "opost", 1); st_set(&t, "cs7", 1); } else { st_set(&t, "parenb", 0); st_set(&t, "istrip", 0); st_set(&t, "opost", 0); st_set(&t, "cs8", 1); } nset = 1; continue; }
+        if (!strcmp(name, "nl")) { if (neg) { st_set(&t, "icrnl", 1); st_set(&t, "inlcr", 0); st_set(&t, "igncr", 0); st_set(&t, "onlcr", 1); st_set(&t, "ocrnl", 0); st_set(&t, "onlret", 0); } else { st_set(&t, "icrnl", 0); st_set(&t, "onlcr", 0); } nset = 1; continue; }
+        if (!strcmp(s, "ek")) { t.cc[2] = 127; t.cc[3] = 21; nset = 1; continue; }
+        if (!strcmp(name, "crt")) { st_set(&t, "echoe", 1); st_set(&t, "echoctl", 1); st_set(&t, "echoke", 1); nset = 1; continue; }
+        if (!strcmp(s, "dec")) { st_set(&t, "echoe", 1); st_set(&t, "echoctl", 1); st_set(&t, "echoke", 1); st_set(&t, "ixany", 0); t.cc[0] = 3; t.cc[2] = 127; t.cc[3] = 21; nset = 1; continue; }
+        if (!strcmp(name, "decctlq")) { st_set(&t, "ixany", neg); nset = 1; continue; }
+        if (!strcmp(name, "tabs")) { if (neg) st_set(&t, "tab3", 1); else st_set(&t, "tab0", 1); nset = 1; continue; }
+        if (!strcmp(name, "lcase") || !strcmp(name, "LCASE")) { st_set(&t, "xcase", !neg); st_set(&t, "iuclc", !neg); st_set(&t, "olcuc", !neg); nset = 1; continue; }
+        if ((k = st_find(name)) >= 0 && (!neg || st_modes[k].mask != st_modes[k].bits || st_modes[k].type == SM_C || 1)) {
+            if (neg && (!strncmp(name, "cs", 2) || !strncmp(name, "nl", 2) || !strncmp(name, "cr", 2) || !strncmp(name, "tab", 3) || !strncmp(name, "bs", 2) || !strncmp(name, "vt", 2) || !strncmp(name, "ff", 2)) && isdigit((unsigned char)name[strlen(name) - 1]))
+                { say("invalid argument '%s'", s); usage_error(); }
+            st_set(&t, name, !neg);
+            nset = 1;
+            continue;
+        }
+        if (!neg) {
+            int j, ch = -1;
+            for (j = 0; st_chars[j].name; j++) if (!strcmp(st_chars[j].name, s)) ch = st_chars[j].idx;
+            if (ch >= 0 || !strcmp(s, "min") || !strcmp(s, "time")) {
+                unsigned char v;
+                if (i + 1 >= ns) { say("missing argument to '%s'", s); usage_error(); }
+                i++;
+                if (ch < 0) { long n = strtol(sv[i], &e, 0); if (*e || n < 0 || n > 255) die(1, "invalid integer argument: '%s'", sv[i]); v = n; ch = s[1] == 'i' && s[0] == 'm' ? 6 : 5; if (!strcmp(s, "min")) ch = 6; else ch = 5; }
+                else if (st_charval(sv[i], &v) < 0) die(1, "invalid integer argument: '%s'", sv[i]);
+                t.cc[ch] = v; nset = 1; continue;
+            }
+            if (!strcmp(s, "rows") || !strcmp(s, "cols") || !strcmp(s, "columns")) {
+                long n;
+                if (i + 1 >= ns) { say("missing argument to '%s'", s); usage_error(); }
+                n = strtol(sv[++i], &e, 0);
+                if (*e || n < 0) die(1, "invalid integer argument: '%s'", sv[i]);
+                if (s[0] == 'r') ws.r = n; else ws.c = n;
+                ioctl(fd, 0x5414, &ws);
+                continue;
+            }
+            if (!strcmp(s, "line")) {
+                long n;
+                if (i + 1 >= ns) { say("missing argument to '%s'", s); usage_error(); }
+                n = strtol(sv[++i], &e, 0);
+                if (*e || n < 0 || n > 255) die(1, "invalid integer argument: '%s'", sv[i]);
+                t.line = n; nset = 1; continue;
+            }
+            if (!strcmp(s, "ispeed") || !strcmp(s, "ospeed") || (isdigit((unsigned char)s[0]) && !strchr(s, ':'))) {
+                const char *v = isdigit((unsigned char)s[0]) ? s : (i + 1 < ns ? sv[++i] : NULL);
+                int j, found = -1;
+                long sp;
+                if (!v) { say("missing argument to '%s'", s); usage_error(); }
+                sp = strtol(v, &e, 10);
+                if (*e) die(1, "invalid %s speed '%s'", !strcmp(s, "ispeed") ? "input" : !strcmp(s, "ospeed") ? "output" : "output", v);
+                for (j = 0; st_speeds[j].speed >= 0; j++) if (st_speeds[j].speed == sp) found = j;
+                {
+                    unsigned code = found >= 0 ? st_speeds[found].code : 0x1000;
+                    int setin = strcmp(s, "ospeed"), setout = strcmp(s, "ispeed");
+                    if (setout) { t.cflag = (t.cflag & ~0x100fu) | code; t.ospeed = sp; }
+                    if (setin) { t.cflag = (t.cflag & ~0x100f0000u) | (code & 0xf) << 16 | (code & 0x1000) << 16; t.ispeed = sp; }
+                }
+                nset = 1; continue;
+            }
+            if (strchr(s, ':')) {
+                unsigned long v4[4];
+                int n = 0, k2, j2;
+                char *p = (char *)s;
+                unsigned long cc[32];
+                for (j2 = 0; j2 < 4; j2++) {
+                    char *e2;
+                    v4[j2] = strtoul(p, &e2, 16);
+                    if (e2 == p || (j2 < 3 && *e2 != ':')) { say("invalid argument '%s'", s); usage_error(); }
+                    p = e2;
+                    if (j2 < 3) p++;
+                }
+                for (k2 = 0; k2 < 32 && *p == ':'; k2++) { cc[k2] = strtoul(p + 1, &p, 16); n++; }
+                if (n != 32 || *p) { say("invalid argument '%s'", s); usage_error(); }
+                t.iflag = v4[0]; t.oflag = v4[1]; t.cflag = v4[2]; t.lflag = v4[3];
+                for (k2 = 0; k2 < 19 && k2 < n; k2++) t.cc[k2] = cc[k2];
+                nset = 1; continue;
+            }
+        }
+        { say("invalid argument '%s'", s); usage_error(); }
+    }
+    if (nset && memcmp(&t, &orig, sizeof t) != 0) {
+        struct ktermios back;
+        if (ioctl(fd, 0x402c542b, &t) < 0) { say("%s: %s", dev ? dev : "'standard input'", strerror(errno)); return 1; }
+        if (ioctl(fd, 0x802c542a, &back) < 0 || (st_norm(&back), 0) || back.iflag != t.iflag || back.oflag != t.oflag || (back.cflag & ~0xf0000000u) != (t.cflag & ~0xf0000000u) || back.lflag != t.lflag || memcmp(back.cc, t.cc, 19))
+            die(1, "%s: unable to perform all requested operations", dev ? dev : "'standard input'");
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- pr ---- */
+
+struct prfile { char **ln; size_t n; const char *name; time_t mtime; };
+
+static int pr_cols = 1, pr_across, pr_ctl, pr_double, pr_ff, pr_join, pr_merge, pr_nohead, pr_number, pr_numw = 5, pr_ctlv, pr_offset, pr_plen = 66,
+    pr_pwidth = 72, pr_trunc, pr_expand, pr_ecnt = 8, pr_ichar, pr_iwidth = 8, pr_sepset, pr_ssep, pr_wset;
+static char pr_echar = '\t', pr_nsep = '\t';
+static const char *pr_sepstr, *pr_header, *pr_datefmt = "%Y-%m-%d %H:%M";
+static long pr_first = 1, pr_last = 0, pr_nstart = 1;
+
+static void pr_read(struct prfile *f, int fd)
+{
+    char *buf;
+    size_t len, i, start = 0, cap = 0;
+    f->n = 0; f->ln = NULL;
+    if (read_all(fd, &buf, &len) < 0) return;
+    for (i = 0; i <= len; i++) {
+        if (i == len ? i > start : buf[i] == '\n') {
+            if (f->n == cap) { cap = cap ? cap * 2 : 64; f->ln = xrealloc(f->ln, cap * sizeof *f->ln); }
+            f->ln[f->n] = xmalloc(i - start + 1);
+            memcpy(f->ln[f->n], buf + start, i - start);
+            f->ln[f->n][i - start] = 0;
+            f->n++;
+            start = i + 1;
+        }
+    }
+}
+
+static int pr_dispw(const char *s, int col)
+{
+    for (; *s; s++) col = *s == '\t' ? col + 8 - col % 8 : col + 1;
+    return col;
+}
+
+/* the text of one line as it will be shown: -e tabs expanded, controls made visible */
+static char *pr_text(const char *s)
+{
+    size_t cap = strlen(s) * 4 + 16, o = 0;
+    char *out = xmalloc(cap);
+    int col = 0;
+    for (; *s; s++) {
+        unsigned char c = *s;
+        if (o + 8 > cap) { cap *= 2; out = xrealloc(out, cap); }
+        if (pr_expand && (c == (unsigned char)pr_echar || c == '\t')) { int w = pr_ecnt - col % pr_ecnt; while (w--) { out[o++] = ' '; col++; } continue; }
+        if (pr_ctl && c < 32 && c != '\t') { out[o++] = '^'; out[o++] = c + 64; col += 2; continue; }
+        if (pr_ctl && c == 127) { out[o++] = '^'; out[o++] = '?'; col += 2; continue; }
+        if ((pr_ctl || pr_ctlv) && c >= 128) { o += sprintf(out + o, "\\%03o", c); col += 4; continue; }
+        if (pr_ctlv && c < 32 && c != '\t') { o += sprintf(out + o, "\\%03o", c); col += 4; continue; }
+        out[o++] = c;
+        col = c == '\t' ? col + 8 - col % 8 : col + 1;
+    }
+    out[o] = 0;
+    return out;
+}
+
+static void pr_pad(char **buf, size_t *o, size_t *cap, int from, int to)
+{
+    while (*o + (size_t)(to - from) + 8 > *cap) { *cap = *cap * 2 + 64; *buf = xrealloc(*buf, *cap); }
+    if (!pr_sepset) while (from / 8 < to / 8) { (*buf)[(*o)++] = '\t'; from = (from / 8 + 1) * 8; }
+    while (from < to) { (*buf)[(*o)++] = ' '; from++; }
+}
+
+static void pr_compress(char *line)
+{
+    char *out = xmalloc(strlen(line) + 1), *p = line, *o = out;
+    int col = 0;
+    while (*p) {
+        if (*p == ' ') {
+            const char *q = p;
+            int c2 = col;
+            while (*q == ' ') { q++; c2++; }
+            while (col / pr_iwidth < c2 / pr_iwidth) {
+                int next = (col / pr_iwidth + 1) * pr_iwidth;
+                if (next > c2) break;
+                if (next - col < 2) break;
+                *o++ = pr_ichar;
+                col = next;
+            }
+            while (col < c2) { *o++ = ' '; col++; }
+            p = (char *)q;
+        } else { *o++ = *p; col = *p == '\t' ? col + 8 - col % 8 : col + 1; p++; }
+    }
+    *o = 0;
+    strcpy(line, out);
+    free(out);
+}
+
+static void pr_header_lines(const char *hdr, time_t mt, long page)
+{
+    char date[128], pg[32], line[1024];
+    int avail, hl = strlen(hdr), lhs, rhs, i;
+    struct tm *tm = localtime(&mt);
+    strftime(date, sizeof date, pr_datefmt, tm);
+    snprintf(pg, sizeof pg, "Page %ld", page);
+    avail = pr_pwidth - (int)strlen(date) - (int)strlen(pg);
+    lhs = (avail - hl) / 2;
+    if (lhs < 1) lhs = 1;
+    rhs = avail - hl - lhs;
+    if (rhs < 1) rhs = 1;
+    snprintf(line, sizeof line, "%s%*s%s%*s%s", date, lhs, "", hdr, rhs, "", pg);
+    for (i = 0; i < pr_offset; i++) putchar(' ');
+    putchar('\n');
+    putchar('\n');
+    for (i = 0; i < pr_offset; i++) putchar(' ');
+    puts(line);
+    putchar('\n');
+    putchar('\n');
+}
+
+/* the numbered, cut-to-fit text of one cell. tabstart says whether a tab after the number stays a tab */
+static char *pr_cell(const char *s, long num, int limit, int keeptab)
+{
+    char *t = pr_text(s), *r;
+    size_t cap = strlen(t) + 64;
+    int o = 0;
+    r = xmalloc(cap);
+    if (num >= 0) {
+        o = sprintf(r, "%*ld", pr_numw, num);
+        if (pr_nsep == '\t' && !keeptab) { int w = 8 - pr_numw % 8; while (w--) r[o++] = ' '; }
+        else r[o++] = pr_nsep;
+    }
+    snprintf(r + o, cap - o, "%s", t);
+    free(t);
+    if (limit > 0) {
+        int col = 0;
+        char *p = r;
+        for (; *p; p++) {
+            int nc = *p == '\t' ? col + 8 - col % 8 : col + 1;
+            if (nc > limit) { *p = 0; break; }
+            col = nc;
+        }
+    }
+    return r;
+}
+
+static int t_pr(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "across", 0, 'a' }, { "show-control-characters", 0, 'c' }, { "double-space", 0, 'd' }, { "date-format", 1, 'D' },
+        { "expand-tabs", 2, 'e' }, { "form-feed", 0, 'F' }, { "header", 1, 'h' }, { "output-tabs", 2, 'i' }, { "join-lines", 0, 'J' }, { "length", 1, 'l' },
+        { "merge", 0, 'm' }, { "number-lines", 2, 'n' }, { "first-line-number", 1, 'N' }, { "indent", 1, 'o' }, { "no-file-warnings", 0, 'r' },
+        { "separator", 2, 's' }, { "sep-string", 2, 'S' }, { "omit-header", 0, 't' }, { "omit-pagination", 0, 'T' }, { "show-nonprinting", 0, 'v' },
+        { "width", 1, 'w' }, { "page-width", 1, 'W' }, { "columns", 1, 1000 }, { NULL, 0, 0 } };
+    int c, i, nf = 0, lastdig = 0, hdrset = 0, ncolsarg = 0;
+    struct prfile *files;
+    unsigned long v;
+    opts_reset();
+    while ((c = getopts(argc, argv, "0123456789acdD:e::fFh:i::Jl:mn::N:o:rs::S::tTvw:W:", lo))) {
+        if (c >= '0' && c <= '9') { pr_cols = lastdig ? pr_cols * 10 + (c - '0') : c - '0'; lastdig = 1; ncolsarg = 1; continue; }
+        lastdig = 0;
+        switch (c) {
+        case 1000: if (!parse_ulong(optarg, &v) || !v) die(1, "invalid number of columns: '%s'", optarg); pr_cols = v; ncolsarg = 1; break;
+        case 'a': pr_across = 1; break; case 'c': pr_ctl = 1; break; case 'd': pr_double = 1; break; case 'D': pr_datefmt = optarg; break;
+        case 'e': pr_expand = 1; if (optarg && *optarg) { if (!isdigit((unsigned char)optarg[0])) { pr_echar = optarg[0]; optarg++; } if (*optarg) pr_ecnt = atoi(optarg); } break;
+        case 'f': case 'F': pr_ff = 1; break; case 'h': pr_header = optarg; hdrset = 1; break;
+        case 'i': pr_ichar = '\t'; if (optarg && *optarg) { if (!isdigit((unsigned char)optarg[0])) { pr_ichar = optarg[0]; optarg++; } if (*optarg) pr_iwidth = atoi(optarg); } break;
+        case 'J': pr_join = 1; break;
+        case 'l': if (!parse_ulong(optarg, &v) || !v) die(1, "'-l PAGE_LENGTH' invalid number of lines: '%s': Numerical result out of range", optarg); pr_plen = v; break;
+        case 'm': pr_merge = 1; break;
+        case 'n': pr_number = 1; if (optarg && *optarg) { if (!isdigit((unsigned char)optarg[0])) { pr_nsep = optarg[0]; optarg++; } if (*optarg) pr_numw = atoi(optarg); } break;
+        case 'N': { char *e; pr_nstart = strtol(optarg, &e, 10); if (*e) die(1, "invalid line number field width: '%s'", optarg); break; }
+        case 'o': if (!parse_ulong(optarg, &v)) die(1, "'-o MARGIN' invalid line offset: '%s'", optarg); pr_offset = v; break;
+        case 's': pr_sepset = 1; pr_sepstr = optarg && *optarg ? optarg : "\t"; break;
+        case 'S': pr_ssep = 1; pr_sepstr = optarg && *optarg ? optarg : " "; break;
+        case 't': pr_nohead = 1; break; case 'T': pr_nohead = 1; break; case 'v': pr_ctlv = 1; break;
+        case 'w': if (!parse_ulong(optarg, &v) || !v) die(1, "'-w PAGE_WIDTH' invalid number of characters: '%s': Numerical result out of range", optarg); pr_pwidth = v; pr_wset = 1; break;
+        case 'W': if (!parse_ulong(optarg, &v) || !v) die(1, "'-W PAGE_WIDTH' invalid number of characters: '%s': Numerical result out of range", optarg); pr_pwidth = v; pr_trunc = 1; pr_wset = 1; break;
+        default: break;
+        }
+    }
+    if (pr_merge && ncolsarg && pr_cols > 1) die(1, "cannot specify number of columns when printing in parallel");
+    if (pr_merge && pr_across) die(1, "cannot specify both printing across and printing in parallel");
+    files = xmalloc((nops + 2) * sizeof *files);
+    for (i = 0; i < nops; i++) {
+        if (ops[i][0] == '+') {
+            char *e;
+            pr_first = strtol(ops[i] + 1, &e, 10);
+            if (*e == ':') pr_last = strtol(e + 1, &e, 10);
+            if (*e || pr_first < 1) die(1, "invalid page range '%s'", ops[i]);
+            continue;
+        }
+        {
+            int fd = open_input(ops[i]);
+            struct stat st;
+            if (fd < 0) { say("%s: %s", ops[i], strerror(errno)); return 1; }
+            files[nf].name = ops[i];
+            files[nf].mtime = !strcmp(ops[i], "-") || fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ? time(NULL) : st.st_mtime;
+            pr_read(&files[nf], fd);
+            if (fd) close(fd);
+            nf++;
+        }
+    }
+    if (!nf) {
+        files[0].name = "-"; files[0].mtime = time(NULL);
+        pr_read(&files[0], 0);
+        nf = 1;
+    }
+    {
+        int hdr_lines = pr_nohead || pr_plen <= 10 ? 0 : 5, body = hdr_lines ? pr_plen - 10 : pr_plen;
+        int ncol = pr_merge ? nf : pr_cols, width, sepw = (pr_ssep || pr_sepset) ? (int)strlen(pr_sepstr) : 0;
+        int fi, nrun = pr_merge ? 1 : nf;
+        long page_no;
+        if (ncol < 1) ncol = 1;
+        width = (pr_pwidth - sepw * (ncol - 1)) / ncol;
+        if (pr_double) body = (body + 1) / 2;
+        for (fi = 0; fi < nrun; fi++) {
+            struct prfile *f = &files[fi];
+            long pos = 0, total = pr_merge ? 0 : (long)f->n, line_no = pr_nstart;
+            int npages = 0;
+            size_t j;
+            if (pr_merge) { for (j = 0; j < (size_t)nf; j++) if ((long)files[j].n > total) total = files[j].n; }
+            if (!total) { if (pr_first > 1) say("starting page number %ld exceeds page count 1", pr_first); continue; }
+            {
+                long per = ncol > 1 && !pr_merge ? (long)body * ncol : body;
+                npages = (total + per - 1) / per;
+                if (pr_first > npages) { say("starting page number %ld exceeds page count %d", pr_first, npages); }
+            }
+            for (page_no = 1; pos < total; page_no++) {
+                int cnt, cc, r, heights[64];
+                long chunk, per;
+                char **rows;
+                int nrows = 0, show = page_no >= pr_first && (!pr_last || page_no <= pr_last);
+                per = ncol > 1 && !pr_merge ? (long)body * ncol : body;
+                chunk = total - pos < per ? total - pos : per;
+                cnt = pr_merge || ncol == 1 ? (int)chunk : pr_across ? (int)((chunk + ncol - 1) / ncol) : (int)(chunk / ncol + (chunk % ncol ? 1 : 0));
+                if (ncol <= 64) for (cc = 0; cc < ncol; cc++) heights[cc] = (int)(chunk / ncol) + (cc < chunk % ncol);
+                rows = xmalloc((body + 1) * sizeof *rows);
+                for (r = 0; r < cnt; r++) {
+                    char *buf = xmalloc(256);
+                    size_t o = 0, cap = 256;
+                    int curcol = pr_offset;
+                    buf[0] = 0;
+                    for (cc = 0; cc < ncol; cc++) {
+                        long idx = -1;
+                        const char *src = NULL;
+                        long num = -1;
+                        char *cell;
+                        int target = pr_offset + cc * (width + sepw), keeptab = cc == 0 || pr_across || pr_merge;
+                        if (pr_merge) { idx = pos + r; if (idx < (long)files[cc].n) { src = files[cc].ln[idx]; num = pr_number && cc == 0 ? line_no + r : -1; } }
+                        else if (ncol == 1) { idx = pos + r; src = f->ln[idx]; num = pr_number ? line_no + r : -1; }
+                        else if (pr_across) { idx = pos + (long)r * ncol + cc; if (idx < pos + chunk) { src = f->ln[idx]; num = pr_number ? line_no + (idx - pos) : -1; } }
+                        else {
+                            long start = 0, k;
+                            for (k = 0; k < cc; k++) start += heights[k];
+                            if (r < heights[cc]) { idx = pos + start + r; src = f->ln[idx]; num = pr_number ? line_no + (idx - pos) : -1; }
+                        }
+                        if (!src) {
+                            if (pr_merge) src = "";
+                            else continue;
+                        }
+                        cell = pr_cell(src, num, ncol > 1 && !pr_join && !pr_sepset && !(pr_ssep && cc == ncol - 1) ? width - (pr_ssep ? 0 : 1) : (ncol == 1 && pr_trunc && !pr_join ? pr_pwidth : 0), keeptab);
+                        if (cc > 0) {
+                            if (pr_join) { size_t sl = strlen(pr_sepstr ? pr_sepstr : "\t"); const char *sp = pr_sepstr ? pr_sepstr : "\t"; while (o + sl + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); } memcpy(buf + o, sp, sl); o += sl; curcol = pr_dispw(sp, curcol); }
+                            else if (pr_sepset) { size_t sl = strlen(pr_sepstr); while (o + sl + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); } memcpy(buf + o, pr_sepstr, sl); o += sl; curcol += sl; }
+                            else if (pr_ssep) { size_t sl = strlen(pr_sepstr); pr_pad(&buf, &o, &cap, curcol, target - sepw); while (o + sl + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); } memcpy(buf + o, pr_sepstr, sl); o += sl; curcol = target; }
+                            else { pr_pad(&buf, &o, &cap, curcol, target); curcol = target; }
+                        }
+                        {
+                            size_t cl = strlen(cell);
+                            while (o + cl + 1 > cap) { cap *= 2; buf = xrealloc(buf, cap); }
+                            memcpy(buf + o, cell, cl);
+                            o += cl;
+                            buf[o] = 0;
+                            curcol = pr_dispw(cell, curcol);
+                        }
+                        free(cell);
+                    }
+                    buf[o] = 0;
+                    if (pr_ichar) pr_compress(buf);
+                    rows[nrows++] = buf;
+                }
+                if (show) {
+                    int printed = 0;
+                    if (hdr_lines) pr_header_lines(pr_merge && !hdrset ? "" : hdrset ? pr_header : (!strcmp(f->name, "-") ? "" : f->name), pr_merge ? time(NULL) : f->mtime, page_no);
+                    for (r = 0; r < nrows; r++) {
+                        int k;
+                        for (k = 0; k < pr_offset; k++) putchar(' ');
+                        fputs(rows[r], stdout);
+                        putchar('\n');
+                        printed++;
+                        if (pr_double) { putchar('\n'); printed++; }
+                    }
+                    if (hdr_lines) {
+                        if (pr_ff) putchar('\f');
+                        else { int full = pr_double ? body * 2 : body; for (; printed < full; printed++) putchar('\n'); for (r = 0; r < 5; r++) putchar('\n'); }
+                    }
+                }
+                for (r = 0; r < nrows; r++) free(rows[r]);
+                free(rows);
+                pos += chunk;
+                line_no += chunk;
+            }
+        }
+    }
+    return finish_stdout() ? 1 : 0;
+}
+
+/* ---- fmt ---- */
+
+struct fword { char *text; int len, space, period, final, punct, paren, nspace; long best; int brk, line_len; };
+
+static int fm_width = 75, fm_goal, fm_crown, fm_tagged, fm_split, fm_uniform, fm_tabs;
+static const char *fm_prefix = "";
+static int fm_plen;
+
+#define FM_SQR(n) ((long)(n) * (long)(n))
+#define FM_EQUIV(n) FM_SQR(n)
+#define FM_SHORT(n) FM_EQUIV((n) * 10)
+#define FM_RAGGED(n) (FM_SHORT(n) / 2)
+#define FM_LINE FM_EQUIV(70)
+#define FM_WIDOW(n) (FM_EQUIV(200) / ((n) + 2))
+#define FM_ORPHAN(n) (FM_EQUIV(150) / ((n) + 2))
+#define FM_SENTENCE FM_EQUIV(50)
+#define FM_NOBREAK FM_EQUIV(600)
+#define FM_PUNCT FM_EQUIV(40)
+#define FM_PAREN FM_EQUIV(40)
+
+static long fm_base_cost(struct fword *w, struct fword *first)
+{
+    long cost = FM_LINE;
+    if (w > first) {
+        if (w[-1].period) {
+            if (w[-1].final) cost -= FM_SENTENCE;
+            else cost += FM_NOBREAK;
+        } else if (w[-1].punct) cost -= FM_PUNCT;
+        else if (w > first + 1 && w[-2].final) cost += FM_WIDOW(w[-1].len);
+    }
+    if (w->paren) cost -= FM_PAREN;
+    else if (w->final) cost += FM_ORPHAN(w->len);
+    return cost;
+}
+
+static void fm_put_space(int *col, int n)
+{
+    int target = *col + n;
+    if (fm_tabs) {
+        int tab = target / 8 * 8;
+        if (*col + 1 < tab) while (*col < tab) { putchar('\t'); *col = (*col / 8 + 1) * 8; }
+    }
+    while (*col < target) { putchar(' '); (*col)++; }
+}
+
+static void fm_para(struct fword *w, int n, int first_indent, int other_indent, int pfx_indent)
+{
+    int i, width = fm_width - fm_plen + 1, goal = fm_goal - fm_plen, col;
+    long *bestc = xmalloc((n + 1) * sizeof *bestc);
+    int *nb = xmalloc((n + 1) * sizeof *nb), *ll = xmalloc((n + 1) * sizeof *ll);
+    int start;
+    if (n == 0) { free(bestc); free(nb); free(ll); return; }
+    bestc[n] = 0; nb[n] = n; ll[n] = 0;
+    for (start = n - 1; start >= 0; start--) {
+        long best = (long)(~0UL >> 1);
+        int len = start == 0 ? first_indent : other_indent, k = start;
+        len += w[k].len;
+        do {
+            int next = k + 1;
+            long wc;
+            if (next == n) wc = 0 + bestc[next];
+            else {
+                wc = FM_SHORT(goal - len);
+                if (nb[next] != n) wc += FM_RAGGED(len - ll[next]);
+                wc += bestc[next];
+            }
+            if (wc < best) { best = wc; nb[start] = next; ll[start] = len; }
+            if (next == n) break;
+            len += w[k].space + w[next].len;
+            k = next;
+        } while (len < width);
+        bestc[start] = best + fm_base_cost(&w[start], w);
+    }
+        col = 0;
+    for (i = 0; i < n; ) {
+        int j, ind = i == 0 ? first_indent : other_indent;
+        col = 0;
+        fm_put_space(&col, pfx_indent);
+        fputs(fm_prefix, stdout);
+        col += fm_plen;
+        fm_put_space(&col, ind);
+        for (j = i; j < nb[i]; j++) {
+            fputs(w[j].text, stdout);
+            col += w[j].len;
+            if (j + 1 < nb[i]) fm_put_space(&col, w[j].space);
+        }
+        putchar('\n');
+        i = nb[i];
+    }
+    free(bestc); free(nb); free(ll);
+}
+
+static int fm_indent(const char *s, int *chars)
+{
+    int col = 0, i = 0;
+    for (; s[i] == ' ' || s[i] == '\t'; i++) { if (s[i] == '\t') { fm_tabs = 1; col = col / 8 * 8 + 8; } else col++; }
+    *chars = i;
+    return col;
+}
+
+static int t_fmt(int argc, char **argv)
+{
+    static const struct opt lo[] = { { "crown-margin", 0, 'c' }, { "tagged-paragraph", 0, 't' }, { "split-only", 0, 's' }, { "uniform-spacing", 0, 'u' },
+        { "prefix", 1, 'p' }, { "width", 1, 'w' }, { "goal", 1, 'g' }, { NULL, 0, 0 } };
+    int c, i, goalset = 0, bad = 0, lastdig = 0, wd = 0;
+    unsigned long v;
+    opts_reset();
+    while ((c = getopts(argc, argv, "0123456789ctsup:w:g:", lo))) {
+        if (c >= '0' && c <= '9') { wd = lastdig ? wd * 10 + c - '0' : c - '0'; lastdig = 1; fm_width = wd; continue; }
+        lastdig = 0;
+        switch (c) {
+        case 'c': fm_crown = 1; break; case 't': fm_tagged = 1; break; case 's': fm_split = 1; break; case 'u': fm_uniform = 1; break;
+        case 'p': fm_prefix = optarg; fm_plen = strlen(optarg); break;
+        case 'w': if (!parse_ulong(optarg, &v)) die(1, "invalid width: '%s'", optarg); fm_width = v; break;
+        case 'g': if (!parse_ulong(optarg, &v)) die(1, "invalid width: '%s'", optarg); fm_goal = v; goalset = 1; break;
+        default: break;
+        }
+    }
+    if (!goalset) fm_goal = fm_width * 187 / 200;
+    else if (fm_goal > fm_width) die(1, "invalid width: '%d': Value too large for defined data type", fm_goal);
+    if (fm_goal > fm_width) fm_goal = fm_width;
+    if (!nops) ops[nops++] = "-";
+    for (i = 0; i < nops; i++) {
+        FILE *f = !strcmp(ops[i], "-") ? stdin : fopen(ops[i], "r");
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n;
+        struct fword *w = NULL;
+        int wcol0 = 0, nw = 0, cw = 0, first_indent = 0, other_indent = 0, nlines = 0, pindent = 0;
+        if (!f) { perr("cannot open '%s' for reading", ops[i]); bad = 1; continue; }
+        for (;;) {
+            char *p;
+            int ch, ind, blank, matched = 1, end = 0;
+            n = getline(&line, &cap, f);
+            if (n < 0) end = 1;
+            else {
+                if (n && line[n - 1] == '\n') line[--n] = 0;
+                p = line;
+                if (fm_plen) { matched = !strncmp(p, fm_prefix, fm_plen); if (matched) p += fm_plen; }
+                ind = fm_indent(p, &ch);
+                blank = matched && !p[ch];
+            }
+            if (end || !matched || blank) {
+                if (nw) { if (fm_tagged && nlines == 1) other_indent = first_indent ? 0 : 3; fm_para(w, nw, first_indent, other_indent, pindent); nw = 0; nlines = 0; }
+                if (end) break;
+                if (!matched) puts(line); else putchar('\n');
+                continue;
+            }
+            if (nw) {
+                int cont = 1;
+                if (fm_split) cont = 0;
+                else if (fm_crown || fm_tagged) {
+                    if (nlines == 1) { if (fm_tagged && ind == first_indent) cont = 0; else other_indent = ind; }
+                    else if (ind != other_indent) cont = 0;
+                } else if (ind != first_indent) cont = 0;
+                if (!cont) { if (fm_tagged && nlines == 1) other_indent = first_indent ? 0 : 3; fm_para(w, nw, first_indent, other_indent, pindent); nw = 0; nlines = 0; }
+            }
+            if (!nw) { first_indent = other_indent = ind; pindent = 0; nlines = 0; }
+            nlines++;
+            p += ch;
+            wcol0 = ind;
+            while (*p) {
+                char *s = p;
+                int sp = 0, len, wcol;
+                struct fword *x;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                len = p - s;
+                wcol = (wcol0 += len);
+                while (*p == ' ' || *p == '\t') { if (*p == '\t') { fm_tabs = 1; sp += 8 - (wcol + sp) % 8; } else sp++; p++; }
+                wcol0 += sp;
+                if (nw == cw) { cw = cw ? cw * 2 : 64; w = xrealloc(w, cw * sizeof *w); }
+                x = &w[nw++];
+                memset(x, 0, sizeof *x);
+                x->text = xmalloc(len + 1); memcpy(x->text, s, len); x->text[len] = 0;
+                x->len = len;
+                {
+                    int k = len - 1;
+                    while (k > 0 && strchr("\")']", s[k])) k--;
+                    x->period = strchr(".?!", s[k]) != NULL;
+                    x->punct = !x->period && ispunct((unsigned char)s[len - 1]);
+                    x->paren = strchr("([{", s[0]) != NULL;
+                }
+                if (!*p) { x->space = 1; x->final = x->period; if (x->period) x->space = 2; }
+                else { x->space = sp; x->final = x->period && sp > 1; }
+                if (fm_uniform) x->space = x->final ? 2 : 1;
+            }
+            if (n >= 0 && nw) { }
+        }
+        if (f != stdin) fclose(f);
+    }
+    return finish_stdout() ? 1 : bad;
+}
+
 /* ---- the table and main ---- */
 
 struct applet { const char *name; int (*fn)(int, char **); const char *usage; const char *about; };
 
 static const struct applet applets[] = {
     { "[", t_test, "EXPRESSION ]", "Check file types and compare values." },
+    { "arch", t_uname, "[OPTION]...", "Print the machine hardware name." },
     { "base32", t_base, "[OPTION]... [FILE]", "Base32 encode or decode FILE." },
+    { "basenc", t_basenc, "[OPTION]... [FILE]", "Encode or decode FILE with one of several encodings." },
     { "base64", t_base, "[OPTION]... [FILE]", "Base64 encode or decode FILE." },
+    { "basename", t_basename, "NAME [SUFFIX] | OPTION... NAME...", "Print NAME without any leading directory components, and SUFFIX if it ends the name." },
+    { "cat", t_cat, "[OPTION]... [FILE]...", "Concatenate FILE(s) to standard output." },
+    { "chcon", t_chcon, "[OPTION]... CONTEXT FILE...", "Change the SELinux security context of each FILE to CONTEXT." },
+    { "chgrp", t_chown, "[OPTION]... GROUP FILE...", "Change the group of each FILE to GROUP." },
+    { "chmod", t_chmod, "[OPTION]... MODE[,MODE]... FILE...", "Change the mode of each FILE to MODE." },
+    { "chown", t_chown, "[OPTION]... [OWNER][:[GROUP]] FILE...", "Change the owner and/or group of each FILE." },
     { "chroot", t_chroot, "[OPTION] NEWROOT [COMMAND [ARG]...]", "Run COMMAND with root directory set to NEWROOT." },
     { "cksum", t_cksum, "[OPTION]... [FILE]...", "Print CRC checksum and byte counts of each FILE." },
+    { "comm", t_comm, "[OPTION]... FILE1 FILE2", "Compare sorted files FILE1 and FILE2 line by line." },
+    { "cp", t_cp, "[OPTION]... SOURCE... DEST", "Copy SOURCE to DEST, or several SOURCEs to a DIRECTORY." },
+    { "cut", t_cut, "OPTION... [FILE]...", "Print selected parts of lines from each FILE." },
     { "date", t_date, "[OPTION]... [+FORMAT]", "Print the system date and time." },
     { "dd", t_dd, "[OPERAND]...", "Copy a file, converting and formatting according to the operands." },
     { "df", t_df, "[OPTION]... [FILE]...", "Show information about the file system on which each FILE resides." },
+    { "shred", t_shred, "[OPTION]... FILE...", "Overwrite a file repeatedly to hide its contents, and optionally delete it." },
+    { "csplit", t_csplit, "[OPTION]... FILE PATTERN...", "Split FILE into context-determined pieces." },
+    { "numfmt", t_numfmt, "[OPTION]... [NUMBER]...", "Reformat numbers, scaling them to or from SI and IEC units." },
+    { "dircolors", t_dircolors, "[OPTION]... [FILE]", "Output commands to set the LS_COLORS environment variable." },
+    { "stty", t_stty, "[-F DEVICE] [--file=DEVICE] [SETTING]...", "Print or change terminal characteristics." },
+    { "pr", t_pr, "[OPTION]... [FILE]...", "Paginate or columnate FILE(s) for printing." },
+    { "fmt", t_fmt, "[-WIDTH] [OPTION]... [FILE]...", "Reformat each paragraph in the FILE(s), writing to standard output." },
+    { "dir", t_dir, "[OPTION]... [FILE]...", "List directory contents in columns, with C-style escapes." },
+    { "dirname", t_dirname, "[OPTION] NAME...", "Print NAME with its last component removed." },
     { "du", t_du, "[OPTION]... [FILE]...", "Summarize device usage of the set of FILEs, recursively for directories." },
+    { "echo", t_echo, "[-neE] [STRING]...", "Print the STRINGs, separated by spaces." },
+    { "egrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
+    { "env", t_env, "[OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]", "Run COMMAND in a changed environment, or print the environment." },
     { "expand", t_expand, "[OPTION]... [FILE]...", "Convert tabs in each FILE to spaces." },
     { "expr", t_expr, "EXPRESSION", "Print the value of EXPRESSION to standard output." },
     { "factor", t_factor, "[NUMBER]...", "Print the prime factors of each NUMBER." },
-    { "egrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
+    { "false", t_true, "", "Do nothing, unsuccessfully." },
     { "fgrep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
-    { "grep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
     { "find", t_find, "[-H] [-L] [-P] [PATH...] [EXPRESSION]", "Search for files in a directory hierarchy." },
+    { "fold", t_fold, "[OPTION]... [FILE]...", "Wrap each input line to fit in a given width." },
+    { "grep", t_grep, "[OPTION]... PATTERNS [FILE]...", "Search for PATTERNS in each FILE." },
     { "groups", t_id, "[OPTION]... [USERNAME]...", "Print the groups a user is in." },
+    { "head", t_head, "[OPTION]... [FILE]...", "Print the first 10 lines of each FILE." },
+    { "hostid", t_hostid, "", "Print the numeric identifier of this machine." },
+    { "hostname", t_hostname, "[NAME]", "Print the name of this machine, or set it to NAME." },
     { "id", t_id, "[OPTION]... [USER]", "Print user and group information for the specified USER, or for the current user." },
     { "install", t_install, "[OPTION]... SOURCE... DIRECTORY", "Copy files and set attributes." },
     { "join", t_join, "[OPTION]... FILE1 FILE2", "For each pair of input lines with identical join fields, write a line to standard output." },
+    { "kill", t_kill, "[-s SIGNAL | -SIGNAL] PID...", "Send a signal to processes, or list the signal names with -l." },
+    { "link", t_link, "FILE1 FILE2", "Make a hard link named FILE2 to FILE1." },
+    { "ln", t_ln, "[OPTION]... TARGET [LINK_NAME]", "Make links between files." },
+    { "logname", t_logname, "", "Print the name of the user who logged in." },
     { "ls", t_ls, "[OPTION]... [FILE]...", "List information about the FILEs (the current directory by default)." },
+    { "b2sum", t_digest, "[OPTION]... [FILE]...", "Print or check BLAKE2b (512-bit) checksums." },
     { "md5sum", t_digest, "[OPTION]... [FILE]...", "Print or check MD5 (128-bit) checksums." },
+    { "mkdir", t_mkdir, "[OPTION]... DIRECTORY...", "Create the DIRECTORY(ies), if they do not already exist." },
+    { "mkfifo", t_mkfifo, "[OPTION]... NAME...", "Create named pipes (FIFOs) with the given NAMEs." },
+    { "mknod", t_mknod, "[OPTION]... NAME TYPE [MAJOR MINOR]", "Create the special file NAME of the given TYPE." },
+    { "mktemp", t_mktemp, "[OPTION]... [TEMPLATE]", "Create a temporary file or directory and print its name." },
+    { "mv", t_mv, "[OPTION]... SOURCE... DEST", "Rename SOURCE to DEST, or move SOURCEs to a DIRECTORY." },
     { "nice", t_nice, "[OPTION] [COMMAND [ARG]...]", "Run COMMAND with an adjusted niceness." },
+    { "nl", t_nl, "[OPTION]... [FILE]", "Number the lines of FILE." },
     { "nohup", t_nohup, "COMMAND [ARG]...", "Run COMMAND, ignoring hangup signals." },
+    { "nproc", t_nproc, "[OPTION]...", "Print the number of processing units available." },
     { "od", t_od, "[OPTION]... [FILE]...", "Write an unambiguous representation, octal bytes by default, of FILE to standard output." },
+    { "paste", t_paste, "[OPTION]... [FILE]...", "Merge lines of files side by side." },
+    { "pathchk", t_pathchk, "[OPTION]... NAME...", "Check whether file names are valid or portable." },
+    { "pinky", t_pinky, "[OPTION]... [USER]...", "Print brief information about logged-in users." },
+    { "printenv", t_printenv, "[OPTION]... [VARIABLE]...", "Print the values of the given environment VARIABLEs, or all of them." },
+    { "printf", t_printf, "FORMAT [ARGUMENT]...", "Print ARGUMENT(s) according to FORMAT." },
+    { "pwd", t_pwd, "[OPTION]...", "Print the name of the current working directory." },
+    { "readlink", t_readlink, "[OPTION]... FILE...", "Print the value of a symbolic link, or a file's canonical name." },
+    { "realpath", t_realpath, "[OPTION]... FILE...", "Print the resolved absolute file name." },
+    { "rm", t_rm, "[OPTION]... [FILE]...", "Remove (unlink) the FILE(s)." },
+    { "rmdir", t_rmdir, "[OPTION]... DIRECTORY...", "Remove the DIRECTORY(ies), if they are empty." },
+    { "runcon", t_runcon, "CONTEXT COMMAND [ARG]...", "Run COMMAND with a SELinux security context." },
+    { "sed", t_sed, "[OPTION]... {script-only-if-no-other-script} [input-file]...", "Edit streams of text, line by line." },
+    { "seq", t_seq, "[OPTION]... [FIRST [INCREMENT]] LAST", "Print numbers from FIRST to LAST in steps of INCREMENT." },
     { "sha1sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA1 (160-bit) checksums." },
     { "sha224sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA224 (224-bit) checksums." },
     { "sha256sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA256 (256-bit) checksums." },
     { "sha384sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA384 (384-bit) checksums." },
     { "sha512sum", t_digest, "[OPTION]... [FILE]...", "Print or check SHA512 (512-bit) checksums." },
     { "shuf", t_shuf, "[OPTION]... [FILE]", "Write a random permutation of the input lines to standard output." },
-    { "split", t_split, "[OPTION]... [FILE [PREFIX]]", "Output pieces of FILE to PREFIXaa, PREFIXab, ..." },
-    { "stat", t_stat, "[OPTION]... FILE...", "Display file or file system status." },
-    { "sum", t_cksum, "[OPTION]... [FILE]...", "Print checksum and block counts for each FILE." },
-    { "test", t_test, "EXPRESSION", "Check file types and compare values." },
-    { "timeout", t_timeout, "[OPTION] DURATION COMMAND [ARG]...", "Start COMMAND, and kill it if still running after DURATION." },
-    { "truncate", t_truncate, "OPTION... FILE...", "Shrink or extend the size of each FILE to the specified size." },
-    { "tsort", t_tsort, "[OPTION] [FILE]", "Write totally ordered list consistent with the partial ordering in FILE." },
-    { "unexpand", t_expand, "[OPTION]... [FILE]...", "Convert spaces in each FILE to tabs." },
-    { "arch", t_uname, "[OPTION]...", "Print the machine hardware name." },
-    { "basename", t_basename, "NAME [SUFFIX] | OPTION... NAME...", "Print NAME without any leading directory components, and SUFFIX if it ends the name." },
-    { "cat", t_cat, "[OPTION]... [FILE]...", "Concatenate FILE(s) to standard output." },
-    { "chgrp", t_chown, "[OPTION]... GROUP FILE...", "Change the group of each FILE to GROUP." },
-    { "chmod", t_chmod, "[OPTION]... MODE[,MODE]... FILE...", "Change the mode of each FILE to MODE." },
-    { "chown", t_chown, "[OPTION]... [OWNER][:[GROUP]] FILE...", "Change the owner and/or group of each FILE." },
-    { "comm", t_comm, "[OPTION]... FILE1 FILE2", "Compare sorted files FILE1 and FILE2 line by line." },
-    { "cp", t_cp, "[OPTION]... SOURCE... DEST", "Copy SOURCE to DEST, or several SOURCEs to a DIRECTORY." },
-    { "cut", t_cut, "OPTION... [FILE]...", "Print selected parts of lines from each FILE." },
-    { "dirname", t_dirname, "[OPTION] NAME...", "Print NAME with its last component removed." },
-    { "echo", t_echo, "[-neE] [STRING]...", "Print the STRINGs, separated by spaces." },
-    { "env", t_env, "[OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]", "Run COMMAND in a changed environment, or print the environment." },
-    { "false", t_true, "", "Do nothing, unsuccessfully." },
-    { "fold", t_fold, "[OPTION]... [FILE]...", "Wrap each input line to fit in a given width." },
-    { "head", t_head, "[OPTION]... [FILE]...", "Print the first 10 lines of each FILE." },
-    { "hostid", t_hostid, "", "Print the numeric identifier of this machine." },
-    { "hostname", t_hostname, "[NAME]", "Print the name of this machine, or set it to NAME." },
-    { "link", t_link, "FILE1 FILE2", "Make a hard link named FILE2 to FILE1." },
-    { "ln", t_ln, "[OPTION]... TARGET [LINK_NAME]", "Make links between files." },
-    { "logname", t_logname, "", "Print the name of the user who logged in." },
-    { "mkdir", t_mkdir, "[OPTION]... DIRECTORY...", "Create the DIRECTORY(ies), if they do not already exist." },
-    { "mkfifo", t_mkfifo, "[OPTION]... NAME...", "Create named pipes (FIFOs) with the given NAMEs." },
-    { "mknod", t_mknod, "[OPTION]... NAME TYPE [MAJOR MINOR]", "Create the special file NAME of the given TYPE." },
-    { "mktemp", t_mktemp, "[OPTION]... [TEMPLATE]", "Create a temporary file or directory and print its name." },
-    { "mv", t_mv, "[OPTION]... SOURCE... DEST", "Rename SOURCE to DEST, or move SOURCEs to a DIRECTORY." },
-    { "nl", t_nl, "[OPTION]... [FILE]", "Number the lines of FILE." },
-    { "nproc", t_nproc, "[OPTION]...", "Print the number of processing units available." },
-    { "paste", t_paste, "[OPTION]... [FILE]...", "Merge lines of files side by side." },
-    { "printf", t_printf, "FORMAT [ARGUMENT]...", "Print ARGUMENT(s) according to FORMAT." },
-    { "printenv", t_printenv, "[OPTION]... [VARIABLE]...", "Print the values of the given environment VARIABLEs, or all of them." },
-    { "pwd", t_pwd, "[OPTION]...", "Print the name of the current working directory." },
-    { "readlink", t_readlink, "[OPTION]... FILE...", "Print the value of a symbolic link, or a file's canonical name." },
-    { "realpath", t_realpath, "[OPTION]... FILE...", "Print the resolved absolute file name." },
-    { "rm", t_rm, "[OPTION]... [FILE]...", "Remove (unlink) the FILE(s)." },
-    { "rmdir", t_rmdir, "[OPTION]... DIRECTORY...", "Remove the DIRECTORY(ies), if they are empty." },
-    { "sed", t_sed, "[OPTION]... {script-only-if-no-other-script} [input-file]...", "Edit streams of text, line by line." },
-    { "seq", t_seq, "[OPTION]... [FIRST [INCREMENT]] LAST", "Print numbers from FIRST to LAST in steps of INCREMENT." },
     { "sleep", t_sleep, "NUMBER[SUFFIX]...", "Pause for NUMBER seconds. SUFFIX may be s, m, h or d." },
     { "sort", t_sort, "[OPTION]... [FILE]...", "Write the sorted concatenation of all FILEs to standard output." },
+    { "split", t_split, "[OPTION]... [FILE [PREFIX]]", "Output pieces of FILE to PREFIXaa, PREFIXab, ..." },
+    { "stat", t_stat, "[OPTION]... FILE...", "Display file or file system status." },
+    { "stdbuf", t_stdbuf, "OPTION... COMMAND", "Run COMMAND with modified buffering for its standard streams." },
+    { "sum", t_cksum, "[OPTION]... [FILE]...", "Print checksum and block counts for each FILE." },
     { "sync", t_sync, "[OPTION] [FILE]...", "Flush file system buffers." },
     { "tac", t_tac, "[OPTION]... [FILE]...", "Print each FILE last line first." },
     { "tail", t_tail, "[OPTION]... [FILE]...", "Print the last 10 lines of each FILE." },
     { "tee", t_tee, "[OPTION]... [FILE]...", "Copy standard input to each FILE, and also to standard output." },
+    { "test", t_test, "EXPRESSION", "Check file types and compare values." },
+    { "timeout", t_timeout, "[OPTION] DURATION COMMAND [ARG]...", "Start COMMAND, and kill it if still running after DURATION." },
     { "touch", t_touch, "[OPTION]... FILE...", "Update the access and modification times of each FILE." },
     { "tr", t_tr, "[OPTION]... SET1 [SET2]", "Translate, squeeze, and/or delete characters from standard input." },
     { "true", t_true, "", "Do nothing, successfully." },
+    { "truncate", t_truncate, "OPTION... FILE...", "Shrink or extend the size of each FILE to the specified size." },
+    { "tsort", t_tsort, "[OPTION] [FILE]", "Write totally ordered list consistent with the partial ordering in FILE." },
     { "tty", t_tty, "[OPTION]...", "Print the file name of the terminal connected to standard input." },
     { "uname", t_uname, "[OPTION]...", "Print system information." },
+    { "unexpand", t_expand, "[OPTION]... [FILE]...", "Convert spaces in each FILE to tabs." },
     { "uniq", t_uniq, "[OPTION]... [INPUT [OUTPUT]]", "Filter adjacent matching lines." },
     { "unlink", t_unlink, "FILE", "Remove FILE with the unlink call." },
+    { "uptime", t_uptime, "[OPTION]... [FILE]", "Tell how long the system has been running." },
+    { "users", t_users, "[FILE]", "Print the user names of users currently logged in." },
+    { "vdir", t_dir, "[OPTION]... [FILE]...", "List directory contents in long format, with C-style escapes." },
     { "wc", t_wc, "[OPTION]... [FILE]...", "Print newline, word, and byte counts for each FILE." },
+    { "who", t_who, "[OPTION]... [FILE] [am i]", "Print information about users who are currently logged in." },
     { "whoami", t_whoami, "", "Print the user name for the current effective user ID." },
     { "xargs", t_xargs, "[OPTION]... COMMAND [INITIAL-ARGS]...", "Build and execute command lines from standard input." },
     { "yes", t_yes, "[STRING]...", "Repeatedly output a line with all specified STRING(s), or 'y'." },
